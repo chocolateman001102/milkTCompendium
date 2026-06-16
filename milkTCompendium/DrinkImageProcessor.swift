@@ -50,12 +50,21 @@ enum DrinkImageProcessor {
     private static func recognizeText(in cgImage: CGImage) async throws -> [String] {
         try await Task.detached(priority: .userInitiated) {
             let context = CIContext()
-            let labelCandidates = labelCandidateImages(from: cgImage, context: context)
-            let originalVariants = ocrVariants(from: CIImage(cgImage: cgImage), context: context)
-            let sources = labelCandidates + originalVariants + [cgImage]
+            let source = quickOCRImage(from: CIImage(cgImage: cgImage), context: context) ?? cgImage
+            let sources = [source]
             let lines = try sources.flatMap { try recognizeTextLines(in: $0) }
             return uniqueLines(lines)
         }.value
+    }
+
+    private static func quickOCRImage(from image: CIImage, context: CIContext) -> CGImage? {
+        let normalized = image.oriented(.up)
+        let longestSide = max(normalized.extent.width, normalized.extent.height)
+        let scale = min(1, 1400 / max(longestSide, 1))
+        let resized = normalized
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .enhancedForOCR()
+        return context.createCGImage(resized, from: resized.extent.integral)
     }
 
     private static func labelCandidateImages(from cgImage: CGImage, context: CIContext) -> [CGImage] {
@@ -122,7 +131,7 @@ enum DrinkImageProcessor {
 
     private static func recognizeTextLines(in cgImage: CGImage) throws -> [String] {
         let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
+        request.recognitionLevel = .fast
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["zh-Hans", "en-US"]
         request.customWords = [
@@ -130,7 +139,7 @@ enum DrinkImageProcessor {
             "全糖", "正常糖", "少糖", "七分糖", "半糖", "五分糖", "三分糖", "微糖", "无糖",
             "芝芝", "莓莓", "波波", "珍珠", "拿铁", "乌龙", "茉莉", "柠檬"
         ]
-        request.minimumTextHeight = 0.01
+        request.minimumTextHeight = 0.018
         if #available(iOS 16.0, *) {
             request.automaticallyDetectsLanguage = true
         }
@@ -145,7 +154,7 @@ enum DrinkImageProcessor {
                 }
                 return $0.boundingBox.minX < $1.boundingBox.minX
             }
-            .flatMap { $0.topCandidates(3).map(\.string) }
+            .compactMap { $0.topCandidates(1).first?.string }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
@@ -194,8 +203,22 @@ private extension UIImage {
     }
 
     func bestUprightDrinkOrientation() -> UIImage {
-        let candidates = [self, rotatedByQuarterTurns(1), rotatedByQuarterTurns(2), rotatedByQuarterTurns(3)]
-        return candidates.max { $0.uprightDrinkScore < $1.uprightDrinkScore } ?? self
+        let candidates = (0...3).map { turns in
+            let image = rotatedByQuarterTurns(turns)
+            return (turns: turns, image: image, metrics: image.uprightDrinkMetrics)
+        }
+        let original = candidates[0]
+        let sideways = [candidates[1], candidates[3]]
+            .max { $0.metrics.score < $1.metrics.score }
+        let originalLooksSideways = original.image.size.width > original.image.size.height * 1.12
+
+        if originalLooksSideways,
+           let sideways,
+           sideways.metrics.score > original.metrics.score + 0.22 {
+            return sideways.image
+        }
+
+        return original.image
     }
 
     func addingStickerOutline() -> UIImage {
@@ -268,8 +291,8 @@ private extension UIImage {
         }
     }
 
-    private var uprightDrinkScore: CGFloat {
-        guard let cgImage else { return 0 }
+    private var uprightDrinkMetrics: (score: CGFloat, mouthScore: CGFloat) {
+        guard let cgImage else { return (0, 0) }
 
         let width = min(cgImage.width, 320)
         let height = max(1, Int(CGFloat(cgImage.height) * CGFloat(width) / CGFloat(cgImage.width)))
@@ -285,7 +308,7 @@ private extension UIImage {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            return 0
+            return (0, 0)
         }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
@@ -315,7 +338,7 @@ private extension UIImage {
             }
         }
 
-        guard alphaCount > 0, maxX > minX, maxY > minY else { return 0 }
+        guard alphaCount > 0, maxX > minX, maxY > minY else { return (0, 0) }
 
         let boundingWidth = CGFloat(maxX - minX + 1)
         let boundingHeight = CGFloat(maxY - minY + 1)
@@ -325,7 +348,8 @@ private extension UIImage {
         let bottomWidth = averageRowWidth(from: maxY - (maxY - minY) / 3, to: maxY, rowMinX: rowMinX, rowMaxX: rowMaxX)
         let mouthScore = (topWidth - bottomWidth) / max(boundingWidth, 1)
 
-        return verticalScore * 2 + mouthScore * 1.4 + centroidY * 0.35
+        let score = verticalScore * 2 + mouthScore * 1.4 + centroidY * 0.35
+        return (score, mouthScore)
     }
 
     private func averageRowWidth(from start: Int, to end: Int, rowMinX: [Int], rowMaxX: [Int]) -> CGFloat {
