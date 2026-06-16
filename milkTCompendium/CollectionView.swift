@@ -10,12 +10,12 @@ struct CollectionView: View {
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
     @State private var editingDrink: Drink?
-    @State private var ladderScale: CGFloat = 1
+    @State private var ladderScale: CGFloat = 0.9
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
 
     private var effectiveLadderScale: CGFloat {
-        min(2.35, max(0.86, ladderScale))
+        min(2.4, max(0.52, ladderScale))
     }
 
     private var sortedDrinks: [Drink] {
@@ -65,12 +65,14 @@ struct CollectionView: View {
 
     private var ratingLadder: some View {
         GeometryReader { proxy in
-            let metrics = LadderMetrics(size: proxy.size)
+            let canvasSize = ladderCanvasSize(for: proxy.size)
+            let metrics = LadderMetrics(size: canvasSize)
             let entries = ladderEntries(in: metrics)
 
             ZoomableLadderView(
                 zoomScale: $ladderScale,
                 showsLabels: $showsLadderLabels,
+                contentSize: canvasSize,
                 entries: entries,
                 onTapDrink: { drink in
                     guard draggingDrink == nil, dragTranslation == .zero else { return }
@@ -107,6 +109,7 @@ struct CollectionView: View {
 
                     ForEach(entries) { entry in
                         LadderDrinkNode(drink: entry.drink, showsLabels: showsLadderLabels)
+                            .scaleEffect(nodeCounterScale)
                             .scaleEffect(draggingDrink === entry.drink ? 1.12 : 1)
                             .offset(draggingDrink === entry.drink ? dragTranslation : .zero)
                             .shadow(
@@ -119,7 +122,7 @@ struct CollectionView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .frame(width: proxy.size.width, height: proxy.size.height)
+                .frame(width: canvasSize.width, height: canvasSize.height)
                 .contentShape(Rectangle())
             }
             .background(Color(.systemGroupedBackground))
@@ -137,12 +140,30 @@ struct CollectionView: View {
         }
     }
 
+    private var nodeCounterScale: CGFloat {
+        1 / pow(max(effectiveLadderScale, 0.01), 0.52)
+    }
+
+    private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
+        let drinkCount = CGFloat(max(drinks.count, 1))
+        let densityHeight = 920 + drinkCount * 13
+        return CGSize(
+            width: max(viewport.width * 2.65, 980),
+            height: max(viewport.height * 2.28, densityHeight)
+        )
+    }
+
     private func ladderEntries(in metrics: LadderMetrics) -> [LadderDrinkEntry] {
         var bandUsage: [Int: (left: Int, right: Int)] = [:]
+        var leftColumnBottoms: [CGFloat] = []
+        var rightColumnBottoms: [CGFloat] = []
+        let minimumVerticalSpacing: CGFloat = 76
+        let columnSpacing: CGFloat = 172
+        let nearestColumnDistance: CGFloat = 102
 
         return sortedDrinks.map { drink in
             let y = yPosition(for: drink.rating, metrics: metrics)
-            let band = Int((y - metrics.plotTop) / 44)
+            let band = Int((y - metrics.plotTop) / 52)
             let usage = bandUsage[band, default: (left: 0, right: 0)]
             let hash = stableHash(for: drink)
             let preferRight = hash.isMultiple(of: 2)
@@ -154,28 +175,88 @@ struct CollectionView: View {
                 side = usage.left < usage.right ? .left : .right
             }
 
-            let sideIndex = side == .left ? usage.left : usage.right
             if side == .left {
                 bandUsage[band] = (left: usage.left + 1, right: usage.right)
             } else {
                 bandUsage[band] = (left: usage.left, right: usage.right + 1)
             }
 
-            let stagger = CGFloat(sideIndex % 4) * 25
-            let row = CGFloat((sideIndex / 4) % 3)
-            let jitter = CGFloat(hash % 17) - 8
-            let distance = min(metrics.sideLaneWidth, 58 + stagger + abs(jitter))
-            let x = side == .left ? metrics.centerX - distance : metrics.centerX + distance
-            let shiftedY = y + (row - 1) * 9 + CGFloat((hash / 17) % 7) - 3
+            let placement: CGPoint
+            if side == .left {
+                placement = placementPosition(
+                    preferredY: y,
+                    side: side,
+                    metrics: metrics,
+                    columnBottoms: &leftColumnBottoms,
+                    nearestColumnDistance: nearestColumnDistance,
+                    columnSpacing: columnSpacing,
+                    minimumVerticalSpacing: minimumVerticalSpacing
+                )
+            } else {
+                placement = placementPosition(
+                    preferredY: y,
+                    side: side,
+                    metrics: metrics,
+                    columnBottoms: &rightColumnBottoms,
+                    nearestColumnDistance: nearestColumnDistance,
+                    columnSpacing: columnSpacing,
+                    minimumVerticalSpacing: minimumVerticalSpacing
+                )
+            }
 
             return LadderDrinkEntry(
                 drink: drink,
                 position: CGPoint(
-                    x: min(max(46, x), metrics.size.width - 46),
-                    y: min(max(metrics.plotTop, shiftedY), metrics.plotBottom)
+                    x: min(max(34, placement.x), metrics.size.width - 34),
+                    y: min(max(metrics.plotTop, placement.y), metrics.plotBottom)
                 )
             )
         }
+    }
+
+    private func placementPosition(
+        preferredY: CGFloat,
+        side: LadderSide,
+        metrics: LadderMetrics,
+        columnBottoms: inout [CGFloat],
+        nearestColumnDistance: CGFloat,
+        columnSpacing: CGFloat,
+        minimumVerticalSpacing: CGFloat
+    ) -> CGPoint {
+        let maxColumn = max(0, Int((metrics.sideLaneWidth - nearestColumnDistance) / columnSpacing))
+
+        for column in 0...maxColumn {
+            if column >= columnBottoms.count {
+                columnBottoms.append(-.greatestFiniteMagnitude)
+            }
+
+            if preferredY - columnBottoms[column] >= minimumVerticalSpacing {
+                columnBottoms[column] = preferredY
+                return CGPoint(
+                    x: xPosition(for: side, column: column, metrics: metrics, nearestColumnDistance: nearestColumnDistance, columnSpacing: columnSpacing),
+                    y: preferredY
+                )
+            }
+        }
+
+        let fallbackColumn = maxColumn
+        let adjustedY = min(metrics.plotBottom, columnBottoms[fallbackColumn] + minimumVerticalSpacing)
+        columnBottoms[fallbackColumn] = adjustedY
+        return CGPoint(
+            x: xPosition(for: side, column: fallbackColumn, metrics: metrics, nearestColumnDistance: nearestColumnDistance, columnSpacing: columnSpacing),
+            y: adjustedY
+        )
+    }
+
+    private func xPosition(
+        for side: LadderSide,
+        column: Int,
+        metrics: LadderMetrics,
+        nearestColumnDistance: CGFloat,
+        columnSpacing: CGFloat
+    ) -> CGFloat {
+        let distance = min(metrics.sideLaneWidth, nearestColumnDistance + CGFloat(column) * columnSpacing)
+        return side == .left ? metrics.centerX - distance : metrics.centerX + distance
     }
 
     private func yPosition(for rating: Double, metrics: LadderMetrics) -> CGFloat {
@@ -202,6 +283,7 @@ struct CollectionView: View {
 private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     @Binding var zoomScale: CGFloat
     @Binding var showsLabels: Bool
+    let contentSize: CGSize
     let entries: [LadderDrinkEntry]
     let onTapDrink: (Drink) -> Void
     let onDragChanged: (Drink, CGSize, Bool) -> Void
@@ -236,8 +318,8 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         longPressGesture.cancelsTouchesInView = false
         scrollView.addGestureRecognizer(longPressGesture)
 
-        scrollView.minimumZoomScale = 0.86
-        scrollView.maximumZoomScale = 2.35
+        scrollView.minimumZoomScale = 0.52
+        scrollView.maximumZoomScale = 2.4
         scrollView.zoomScale = zoomScale
         scrollView.bouncesZoom = true
         scrollView.showsHorizontalScrollIndicator = false
@@ -253,16 +335,22 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         scrollView.addSubview(hostingController.view)
         context.coordinator.hostedView = hostingController.view
 
+        let widthConstraint = hostingController.view.widthAnchor.constraint(equalToConstant: contentSize.width)
+        let heightConstraint = hostingController.view.heightAnchor.constraint(equalToConstant: contentSize.height)
+        context.coordinator.widthConstraint = widthConstraint
+        context.coordinator.heightConstraint = heightConstraint
+
         NSLayoutConstraint.activate([
             hostingController.view.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
             hostingController.view.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
             hostingController.view.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
             hostingController.view.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            hostingController.view.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
-            hostingController.view.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
+            widthConstraint,
+            heightConstraint
         ])
 
         context.coordinator.scrollView = scrollView
+        context.coordinator.contentSize = contentSize
         return scrollView
     }
 
@@ -271,10 +359,17 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         context.coordinator.zoomScale = $zoomScale
         context.coordinator.showsLabels = $showsLabels
         context.coordinator.entries = entries
+        context.coordinator.contentSize = contentSize
+        context.coordinator.widthConstraint?.constant = contentSize.width
+        context.coordinator.heightConstraint?.constant = contentSize.height
 
         if !context.coordinator.isZooming,
            abs(scrollView.zoomScale - zoomScale) > 0.001 {
             scrollView.setZoomScale(zoomScale, animated: false)
+        }
+
+        DispatchQueue.main.async {
+            context.coordinator.centerInitialPositionIfNeeded()
         }
     }
 
@@ -288,7 +383,12 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         let hostingController: UIHostingController<AnyView>
         weak var hostedView: UIView?
         weak var scrollView: UIScrollView?
+        weak var widthConstraint: NSLayoutConstraint?
+        weak var heightConstraint: NSLayoutConstraint?
         var isZooming = false
+        var didCenterInitialPosition = false
+        var contentSize: CGSize = .zero
+        var lastReportedZoomScale: CGFloat = 0
         var longPressedDrink: Drink?
         var longPressStartPoint: CGPoint = .zero
 
@@ -363,7 +463,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             return entries
                 .reversed()
                 .first { entry in
-                    let size = showsLabels.wrappedValue ? CGSize(width: 118, height: 94) : CGSize(width: 54, height: 54)
+                    let size = showsLabels.wrappedValue ? CGSize(width: 160, height: 62) : CGSize(width: 38, height: 38)
                     let frame = CGRect(
                         x: entry.position.x - size.width / 2,
                         y: entry.position.y - size.height / 2,
@@ -409,17 +509,48 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             hostedView?.layer.shouldRasterize = true
         }
 
-        func scrollViewDidZoom(_ scrollView: UIScrollView) {}
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            if abs(scrollView.zoomScale - lastReportedZoomScale) > 0.045 {
+                zoomScale.wrappedValue = scrollView.zoomScale
+                lastReportedZoomScale = scrollView.zoomScale
+            }
+
+            let shouldShowLabels = scrollView.zoomScale > 1.32
+            if showsLabels.wrappedValue != shouldShowLabels {
+                showsLabels.wrappedValue = shouldShowLabels
+            }
+        }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             hostedView?.layer.shouldRasterize = false
             isZooming = false
             zoomScale.wrappedValue = scale
+            lastReportedZoomScale = scale
 
-            let shouldShowLabels = scale > 1.2
+            let shouldShowLabels = scale > 1.32
             if showsLabels.wrappedValue != shouldShowLabels {
                 showsLabels.wrappedValue = shouldShowLabels
             }
+        }
+
+        func centerInitialPositionIfNeeded() {
+            guard !didCenterInitialPosition,
+                  let scrollView,
+                  scrollView.bounds.width > 0,
+                  scrollView.bounds.height > 0,
+                  contentSize.width > 0,
+                  contentSize.height > 0 else {
+                return
+            }
+
+            scrollView.layoutIfNeeded()
+            let scaledWidth = contentSize.width * scrollView.zoomScale
+            let scaledHeight = contentSize.height * scrollView.zoomScale
+            let targetX = max(0, (scaledWidth - scrollView.bounds.width) / 2)
+            let targetY = max(0, (scaledHeight - scrollView.bounds.height) / 2)
+            scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
+            lastReportedZoomScale = scrollView.zoomScale
+            didCenterInitialPosition = true
         }
     }
 }
@@ -438,10 +569,10 @@ private struct LadderMetrics {
 
     init(size: CGSize) {
         self.size = size
-        plotTop = 66
-        plotBottom = max(plotTop + 280, size.height - 118)
+        plotTop = 30
+        plotBottom = max(plotTop + 720, size.height - 34)
         centerX = size.width / 2
-        sideLaneWidth = max(62, min(170, size.width * 0.34))
+        sideLaneWidth = max(340, min(620, size.width * 0.48))
     }
 
     var plotHeight: CGFloat {
@@ -467,22 +598,35 @@ private struct LadderAxisView: View {
                 path.move(to: CGPoint(x: metrics.centerX, y: metrics.plotTop))
                 path.addLine(to: CGPoint(x: metrics.centerX, y: metrics.plotBottom))
             }
-            .stroke(.black.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            .stroke(.black.opacity(0.78), style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
 
             ForEach(0...5, id: \.self) { score in
                 let y = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight
 
-                Path { path in
-                    path.move(to: CGPoint(x: metrics.centerX - 36, y: y))
-                    path.addLine(to: CGPoint(x: metrics.centerX + 36, y: y))
+                if score != 1 && score != 5 {
+                    Path { path in
+                        path.move(to: CGPoint(x: 18, y: y))
+                        path.addLine(to: CGPoint(x: metrics.centerX - 102, y: y))
+                        path.move(to: CGPoint(x: metrics.centerX - 54, y: y))
+                        path.addLine(to: CGPoint(x: metrics.size.width - 18, y: y))
+                    }
+                    .stroke(.black.opacity(score == 0 ? 0.76 : 0.2), style: StrokeStyle(lineWidth: score == 0 ? 1.4 : 0.85, lineCap: .round, dash: score == 0 ? [] : [8, 12]))
                 }
-                .stroke(.black.opacity(score == 0 || score == 5 ? 0.82 : 0.34), style: StrokeStyle(lineWidth: score == 0 || score == 5 ? 1.8 : 1.2, lineCap: .round))
+
+                if score > 0 {
+                    let midY = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight + metrics.plotHeight / 10
+                    Path { path in
+                        path.move(to: CGPoint(x: metrics.centerX - 28, y: midY))
+                        path.addLine(to: CGPoint(x: metrics.centerX + 28, y: midY))
+                    }
+                    .stroke(.black.opacity(0.12), style: StrokeStyle(lineWidth: 0.7, lineCap: .round))
+                }
 
                 Text("\(score)")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.black.opacity(0.64))
-                    .frame(width: 28)
-                    .position(x: metrics.centerX - 55, y: y)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.black.opacity(0.52))
+                    .frame(width: 24)
+                    .position(x: metrics.centerX - 78, y: y)
             }
         }
     }
@@ -493,31 +637,31 @@ private struct LadderDrinkNode: View {
     let showsLabels: Bool
 
     var body: some View {
-        VStack(spacing: 5) {
+        VStack(spacing: 3) {
             stickerBadge
 
             if showsLabels {
                 VStack(spacing: 1) {
                     Text(displayName)
-                        .font(.caption2.weight(.semibold))
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
                     Text(displayBrand)
-                        .font(.caption2)
+                        .font(.system(size: 8))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(.white.opacity(0.92))
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
-                .frame(width: 112)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.white.opacity(0.9))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
+                .frame(width: labelWidth)
                 .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
             }
         }
-        .frame(width: showsLabels ? 118 : 54, height: showsLabels ? 94 : 54, alignment: .top)
+        .frame(width: showsLabels ? labelWidth : 32, height: showsLabels ? 58 : 32, alignment: .top)
         .contentShape(Rectangle())
         .accessibilityLabel("\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", drink.rating))")
     }
@@ -540,17 +684,17 @@ private struct LadderDrinkNode: View {
                     .foregroundStyle(.brown.opacity(0.62))
             }
         }
-        .frame(width: 46, height: 46)
+        .frame(width: 34, height: 34)
         .overlay(
             Circle()
                 .stroke(.black.opacity(0.12), lineWidth: 1)
         )
         .overlay(alignment: .bottomTrailing) {
             Text(String(format: "%.2f", drink.rating))
-                .font(.system(size: 8, weight: .bold, design: .rounded).monospacedDigit())
+                .font(.system(size: 7, weight: .bold, design: .rounded).monospacedDigit())
                 .foregroundStyle(.white)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1.5)
                 .background(.black.opacity(0.78))
                 .clipShape(Capsule())
                 .offset(x: 5, y: 3)
@@ -565,6 +709,11 @@ private struct LadderDrinkNode: View {
     private var displayBrand: String {
         let cleaned = drink.brand.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "未知品牌" : cleaned
+    }
+
+    private var labelWidth: CGFloat {
+        let longest = max(displayName.count, displayBrand.count)
+        return min(156, max(76, CGFloat(longest) * 10 + 24))
     }
 }
 

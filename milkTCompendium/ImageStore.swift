@@ -1,6 +1,8 @@
 import UIKit
 
 enum ImageStore {
+    private static let imageCache = NSCache<NSString, UIImage>()
+
     private static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let url = base.appendingPathComponent("DrinkImages", isDirectory: true)
@@ -28,11 +30,21 @@ enum ImageStore {
 
     static func load(_ name: String?) -> UIImage? {
         guard let name else { return nil }
-        return UIImage(contentsOfFile: directory.appendingPathComponent(name).path)
+        let key = name as NSString
+        if let cached = imageCache.object(forKey: key) {
+            return cached
+        }
+
+        guard let image = UIImage(contentsOfFile: directory.appendingPathComponent(name).path) else {
+            return nil
+        }
+        imageCache.setObject(image, forKey: key)
+        return image
     }
 
     static func delete(_ name: String?) {
         guard let name else { return }
+        imageCache.removeObject(forKey: name as NSString)
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
     }
 }

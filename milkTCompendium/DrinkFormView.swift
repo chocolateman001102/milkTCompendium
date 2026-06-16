@@ -688,6 +688,7 @@ private struct CandidateRow: View {
 private struct RatingControl: View {
     @Binding var value: Double
     @State private var lastHapticValue = 4.0
+    @State private var isHorizontalRatingDrag = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -710,9 +711,18 @@ private struct RatingControl: View {
                 }
                 .contentShape(Rectangle())
                 .gesture(
-                    DragGesture(minimumDistance: 0)
+                    DragGesture(minimumDistance: 8)
                         .onChanged { gesture in
+                            if !isHorizontalRatingDrag {
+                                let horizontal = abs(gesture.translation.width)
+                                let vertical = abs(gesture.translation.height)
+                                guard horizontal > vertical * 1.25 else { return }
+                                isHorizontalRatingDrag = true
+                            }
                             updateValue(at: gesture.location.x, width: proxy.size.width)
+                        }
+                        .onEnded { _ in
+                            isHorizontalRatingDrag = false
                         }
                 )
             }
