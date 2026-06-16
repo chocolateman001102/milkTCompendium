@@ -4,7 +4,6 @@ import Vision
 
 struct ProcessedDrinkImage {
     let sticker: UIImage
-    let recognizedText: [String]
 }
 
 enum DrinkImageProcessor {
@@ -14,9 +13,8 @@ enum DrinkImageProcessor {
             throw ProcessingError.invalidImage
         }
 
-        async let sticker = createSticker(from: cgImage)
-        async let text = recognizeText(in: cgImage)
-        return try await ProcessedDrinkImage(sticker: sticker, recognizedText: text)
+        let sticker = try await createSticker(from: cgImage)
+        return ProcessedDrinkImage(sticker: sticker)
     }
 
     private static func createSticker(from cgImage: CGImage) async throws -> UIImage {
@@ -47,147 +45,6 @@ enum DrinkImageProcessor {
         }.value
     }
 
-    private static func recognizeText(in cgImage: CGImage) async throws -> [String] {
-        try await Task.detached(priority: .userInitiated) {
-            let context = CIContext()
-            let source = quickOCRImage(from: CIImage(cgImage: cgImage), context: context) ?? cgImage
-            let sources = [source]
-            let lines = try sources.flatMap { try recognizeTextLines(in: $0) }
-            return uniqueLines(lines)
-        }.value
-    }
-
-    private static func quickOCRImage(from image: CIImage, context: CIContext) -> CGImage? {
-        let normalized = image.oriented(.up)
-        let longestSide = max(normalized.extent.width, normalized.extent.height)
-        let scale = min(1, 1400 / max(longestSide, 1))
-        let resized = normalized
-            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            .enhancedForOCR()
-        return context.createCGImage(resized, from: resized.extent.integral)
-    }
-
-    private static func labelCandidateImages(from cgImage: CGImage, context: CIContext) -> [CGImage] {
-        let request = VNDetectRectanglesRequest()
-        request.maximumObservations = 8
-        request.minimumConfidence = 0.32
-        request.minimumSize = 0.035
-        request.minimumAspectRatio = 0.18
-        request.maximumAspectRatio = 1.0
-        request.quadratureTolerance = 45
-
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        do {
-            try handler.perform([request])
-        } catch {
-            return []
-        }
-
-        let ciImage = CIImage(cgImage: cgImage)
-        return (request.results ?? [])
-            .sorted { $0.confidence > $1.confidence }
-            .flatMap { observation in
-                perspectiveCorrectedImages(from: ciImage, observation: observation, context: context)
-            }
-    }
-
-    private static func perspectiveCorrectedImages(
-        from image: CIImage,
-        observation: VNRectangleObservation,
-        context: CIContext
-    ) -> [CGImage] {
-        let width = image.extent.width
-        let height = image.extent.height
-
-        func imagePoint(_ point: CGPoint) -> CGPoint {
-            CGPoint(x: point.x * width, y: point.y * height)
-        }
-
-        guard let filter = CIFilter(name: "CIPerspectiveCorrection") else { return [] }
-        filter.setValue(image, forKey: kCIInputImageKey)
-        filter.setValue(CIVector(cgPoint: imagePoint(observation.topLeft)), forKey: "inputTopLeft")
-        filter.setValue(CIVector(cgPoint: imagePoint(observation.topRight)), forKey: "inputTopRight")
-        filter.setValue(CIVector(cgPoint: imagePoint(observation.bottomLeft)), forKey: "inputBottomLeft")
-        filter.setValue(CIVector(cgPoint: imagePoint(observation.bottomRight)), forKey: "inputBottomRight")
-
-        guard let output = filter.outputImage else { return [] }
-        return ocrVariants(from: output, context: context)
-    }
-
-    private static func ocrVariants(from image: CIImage, context: CIContext) -> [CGImage] {
-        let normalized = image.oriented(.up)
-        let variants = [
-            normalized,
-            normalized.enhancedForOCR(),
-            normalized.highContrastForOCR()
-        ]
-
-        return variants.compactMap { variant in
-            let extent = variant.extent.integral
-            guard extent.width >= 80, extent.height >= 32 else { return nil }
-            return context.createCGImage(variant, from: extent)
-        }
-    }
-
-    private static func recognizeTextLines(in cgImage: CGImage) throws -> [String] {
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .fast
-        request.usesLanguageCorrection = true
-        request.recognitionLanguages = ["zh-Hans", "en-US"]
-        request.customWords = [
-            "多冰", "正常冰", "标准冰", "少冰", "微冰", "去冰", "不加冰", "常温", "温热", "热饮",
-            "全糖", "正常糖", "少糖", "七分糖", "半糖", "五分糖", "三分糖", "微糖", "无糖",
-            "芝芝", "莓莓", "波波", "珍珠", "拿铁", "乌龙", "茉莉", "柠檬"
-        ]
-        request.minimumTextHeight = 0.018
-        if #available(iOS 16.0, *) {
-            request.automaticallyDetectsLanguage = true
-        }
-
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try handler.perform([request])
-
-        return (request.results ?? [])
-            .sorted {
-                if abs($0.boundingBox.midY - $1.boundingBox.midY) > 0.03 {
-                    return $0.boundingBox.midY > $1.boundingBox.midY
-                }
-                return $0.boundingBox.minX < $1.boundingBox.minX
-            }
-            .compactMap { $0.topCandidates(1).first?.string }
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-    }
-
-    private static func uniqueLines(_ lines: [String]) -> [String] {
-        var seen = Set<String>()
-        return lines.filter { seen.insert($0).inserted }
-    }
-}
-
-private extension CIImage {
-    func enhancedForOCR() -> CIImage {
-        applyingFilter("CIColorControls", parameters: [
-            kCIInputSaturationKey: 0,
-            kCIInputContrastKey: 1.28,
-            kCIInputBrightnessKey: 0.03
-        ])
-        .applyingFilter("CISharpenLuminance", parameters: [
-            kCIInputSharpnessKey: 0.55
-        ])
-    }
-
-    func highContrastForOCR() -> CIImage {
-        applyingFilter("CIColorControls", parameters: [
-            kCIInputSaturationKey: 0,
-            kCIInputContrastKey: 1.65,
-            kCIInputBrightnessKey: 0.08
-        ])
-        .applyingFilter("CIUnsharpMask", parameters: [
-            kCIInputRadiusKey: 1.6,
-            kCIInputIntensityKey: 0.55
-        ])
-    }
 }
 
 private extension UIImage {

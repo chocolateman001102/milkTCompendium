@@ -12,13 +12,13 @@
 		A10000000000000000000003 /* Drink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* Drink.swift */; };
 		A10000000000000000000004 /* ImageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* ImageStore.swift */; };
 		A10000000000000000000005 /* DrinkImageProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* DrinkImageProcessor.swift */; };
-		A10000000000000000000006 /* DrinkLabelParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* DrinkLabelParser.swift */; };
 		A10000000000000000000007 /* DrinkFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* DrinkFormView.swift */; };
 		A10000000000000000000008 /* CollectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* CollectionView.swift */; };
 		A10000000000000000000009 /* DrinkCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* DrinkCardView.swift */; };
 		A1000000000000000000000A /* CameraPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* CameraPicker.swift */; };
 		A1000000000000000000000C /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* LaunchScreen.storyboard */; };
 		A1000000000000000000000D /* BrandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* BrandStore.swift */; };
+		A1000000000000000000000E /* DrinkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* DrinkDetailView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,7 +28,6 @@
 		A20000000000000000000003 /* Drink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Drink.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* ImageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageStore.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* DrinkImageProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrinkImageProcessor.swift; sourceTree = "<group>"; };
-		A20000000000000000000006 /* DrinkLabelParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrinkLabelParser.swift; sourceTree = "<group>"; };
 		A20000000000000000000007 /* DrinkFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrinkFormView.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* CollectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollectionView.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* DrinkCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrinkCardView.swift; sourceTree = "<group>"; };
@@ -36,6 +35,7 @@
 		A2000000000000000000000B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000000000000000000000C /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		A2000000000000000000000D /* BrandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandStore.swift; sourceTree = "<group>"; };
+		A2000000000000000000000E /* DrinkDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrinkDetailView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -65,10 +65,10 @@
 				A20000000000000000000003 /* Drink.swift */,
 				A20000000000000000000004 /* ImageStore.swift */,
 				A20000000000000000000005 /* DrinkImageProcessor.swift */,
-				A20000000000000000000006 /* DrinkLabelParser.swift */,
 				A20000000000000000000007 /* DrinkFormView.swift */,
 				A20000000000000000000008 /* CollectionView.swift */,
 				A20000000000000000000009 /* DrinkCardView.swift */,
+				A2000000000000000000000E /* DrinkDetailView.swift */,
 				A2000000000000000000000A /* CameraPicker.swift */,
 				A2000000000000000000000B /* Assets.xcassets */,
 				A2000000000000000000000C /* LaunchScreen.storyboard */,
@@ -160,10 +160,10 @@
 				A10000000000000000000003 /* Drink.swift in Sources */,
 				A10000000000000000000004 /* ImageStore.swift in Sources */,
 				A10000000000000000000005 /* DrinkImageProcessor.swift in Sources */,
-				A10000000000000000000006 /* DrinkLabelParser.swift in Sources */,
 				A10000000000000000000007 /* DrinkFormView.swift in Sources */,
 				A10000000000000000000008 /* CollectionView.swift in Sources */,
 				A10000000000000000000009 /* DrinkCardView.swift in Sources */,
+				A1000000000000000000000E /* DrinkDetailView.swift in Sources */,
 				A1000000000000000000000A /* CameraPicker.swift in Sources */,
 				A1000000000000000000000D /* BrandStore.swift in Sources */,
 			);

@@ -10,6 +10,8 @@ final class Drink {
     var rating: Double
     var consumedAt: Date
     var location: String
+    var note: String = ""
+    var isLimited: Bool = false
     var originalImageName: String?
     var stickerImageName: String?
     var createdAt: Date
@@ -22,6 +24,8 @@ final class Drink {
         rating: Double,
         consumedAt: Date,
         location: String,
+        note: String = "",
+        isLimited: Bool = false,
         originalImageName: String?,
         stickerImageName: String?
     ) {
@@ -32,6 +36,8 @@ final class Drink {
         self.rating = rating
         self.consumedAt = consumedAt
         self.location = location
+        self.note = note
+        self.isLimited = isLimited
         self.originalImageName = originalImageName
         self.stickerImageName = stickerImageName
         self.createdAt = .now

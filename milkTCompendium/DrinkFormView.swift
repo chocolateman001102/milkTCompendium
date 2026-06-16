@@ -24,6 +24,8 @@ struct DrinkFormView: View {
     @State private var rating = 4.0
     @State private var consumedAt = Date()
     @State private var location = ""
+    @State private var note = ""
+    @State private var isLimited = false
 
     @State private var originalImage: UIImage?
     @State private var stickerImage: UIImage?
@@ -35,8 +37,6 @@ struct DrinkFormView: View {
     @State private var showingBrandPicker = false
     @State private var showingStickerPreview = false
     @State private var isProcessing = false
-    @State private var didRecognizeUsefulInformation = false
-    @State private var nameCandidates: [String] = []
     @State private var errorMessage: String?
 
     private let sweetnessOptions = ["全糖", "正常糖", "少糖", "七分糖", "半糖", "三分糖", "微糖", "无糖", "不另外加糖"]
@@ -56,6 +56,8 @@ struct DrinkFormView: View {
             _rating = State(initialValue: drink.rating)
             _consumedAt = State(initialValue: drink.consumedAt)
             _location = State(initialValue: drink.location)
+            _note = State(initialValue: drink.note)
+            _isLimited = State(initialValue: drink.isLimited)
             _originalImage = State(initialValue: ImageStore.load(drink.originalImageName))
             _stickerImage = State(initialValue: ImageStore.load(drink.stickerImageName))
         }
@@ -64,10 +66,9 @@ struct DrinkFormView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
-                photoCard
-                recognitionCard
-                infoCard
                 ratingCard
+                photoCard
+                infoCard
                 saveButton
             }
             .padding(.horizontal, 18)
@@ -188,7 +189,7 @@ struct DrinkFormView: View {
                 if isProcessing {
                     RoundedRectangle(cornerRadius: 28, style: .continuous)
                         .fill(.black.opacity(0.28))
-                    ProgressView("识别中")
+                    ProgressView("生成贴图中")
                         .tint(.white)
                         .foregroundStyle(.white)
                 }
@@ -221,23 +222,6 @@ struct DrinkFormView: View {
         }
     }
 
-    @ViewBuilder
-    private var recognitionCard: some View {
-        if didRecognizeUsefulInformation {
-            Card(title: "识别结果") {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                    Text("已填入可识别信息")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                CandidateRow(title: "品名候选", values: nameCandidates) { name = $0 }
-            }
-        }
-    }
-
     private var infoCard: some View {
         Card(title: "饮品信息") {
             BrandSelectionField(brand: brand) {
@@ -247,11 +231,13 @@ struct DrinkFormView: View {
 
             OptionChips(title: "甜度", options: sweetnessOptions, selection: $sweetness)
             OptionChips(title: "冰度", options: iceOptions, selection: $iceLevel)
+            LimitedToggle(isOn: $isLimited)
 
             DatePicker("饮用时间", selection: $consumedAt, displayedComponents: [.date, .hourAndMinute])
                 .font(.subheadline)
 
             MinimalTextField(title: "地点", placeholder: "可选", text: $location)
+            MultilineTextField(title: "备注", placeholder: "加料、做法、非常见选项", text: $note)
         }
     }
 
@@ -293,8 +279,6 @@ struct DrinkFormView: View {
     private func process(_ image: UIImage) async {
         originalImage = image
         stickerImage = nil
-        didRecognizeUsefulInformation = false
-        nameCandidates = []
         isProcessing = true
         defer { isProcessing = false }
 
@@ -302,35 +286,8 @@ struct DrinkFormView: View {
             let processed = try await DrinkImageProcessor.process(image)
             didChangeImage = true
             stickerImage = processed.sticker
-            apply(DrinkLabelParser.parse(processed.recognizedText, knownBrands: BrandStore.allKnownBrands))
         } catch {
             errorMessage = error.localizedDescription
-        }
-    }
-
-    private func apply(_ label: DrinkLabelData) {
-        didRecognizeUsefulInformation = label.didRecognizeUsefulInformation
-        nameCandidates = label.nameCandidates
-
-        if brand.isEmpty, !label.brand.isEmpty { brand = label.brand }
-        if name.isEmpty, !label.name.isEmpty { name = label.name }
-        if !label.sweetness.isEmpty { sweetness = normalizedSweetness(label.sweetness) }
-        if !label.iceLevel.isEmpty { iceLevel = normalizedIce(label.iceLevel) }
-    }
-
-    private func normalizedSweetness(_ value: String) -> String {
-        switch value {
-        case "五分糖": "半糖"
-        case "一分糖": "微糖"
-        default: sweetnessOptions.contains(value) ? value : sweetness
-        }
-    }
-
-    private func normalizedIce(_ value: String) -> String {
-        switch value {
-        case "标准冰": "正常冰"
-        case "不加冰": "去冰"
-        default: iceOptions.contains(value) ? value : iceLevel
         }
     }
 
@@ -351,6 +308,8 @@ struct DrinkFormView: View {
                     rating: rating,
                     consumedAt: consumedAt,
                     location: location.trimmingCharacters(in: .whitespacesAndNewlines),
+                    note: note.trimmingCharacters(in: .whitespacesAndNewlines),
+                    isLimited: isLimited,
                     originalImageName: originalName,
                     stickerImageName: stickerName
                 )
@@ -364,6 +323,8 @@ struct DrinkFormView: View {
                 drink.rating = rating
                 drink.consumedAt = consumedAt
                 drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
+                drink.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
+                drink.isLimited = isLimited
 
                 if didChangeImage, let originalImage, let stickerImage {
                     drink.originalImageName = try ImageStore.saveOriginal(originalImage)
@@ -388,12 +349,12 @@ struct DrinkFormView: View {
         rating = 4.0
         consumedAt = .now
         location = ""
+        note = ""
+        isLimited = false
         originalImage = nil
         stickerImage = nil
         photoItem = nil
         didChangeImage = false
-        didRecognizeUsefulInformation = false
-        nameCandidates = []
     }
 }
 
@@ -509,6 +470,59 @@ private struct MinimalTextField: View {
                 .background(Color(.secondarySystemGroupedBackground))
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
+    }
+}
+
+private struct MultilineTextField: View {
+    let title: String
+    let placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextEditor(text: $text)
+                .frame(minHeight: 74)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(alignment: .topLeading) {
+                    if text.isEmpty {
+                        Text(placeholder)
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 16)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .background(Color(.secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+}
+
+private struct LimitedToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            HStack(spacing: 10) {
+                Text("限定")
+                    .font(.subheadline.weight(.semibold))
+                Text(isOn ? "是" : "否")
+                    .font(.caption.weight(.medium))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .foregroundStyle(isOn ? .white : .secondary)
+                    .background(isOn ? Color.primary : Color(.secondarySystemGroupedBackground))
+                    .clipShape(Capsule())
+            }
+        }
+        .toggleStyle(.switch)
+        .padding(.vertical, 2)
     }
 }
 
@@ -652,36 +666,6 @@ private struct BrandPickerView: View {
         selection = brand
         BrandStore.remember(brand)
         dismiss()
-    }
-}
-
-private struct CandidateRow: View {
-    let title: String
-    let values: [String]
-    let onSelect: (String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if values.isEmpty {
-                Text("未找到可靠候选")
-                    .font(.footnote)
-                    .foregroundStyle(.tertiary)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(values, id: \.self) { value in
-                            Button(value) {
-                                onSelect(value)
-                            }
-                            .buttonStyle(ChipButtonStyle(isSelected: false))
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

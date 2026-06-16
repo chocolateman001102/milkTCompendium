@@ -9,8 +9,9 @@ struct CollectionView: View {
     @State private var draggingDrink: Drink?
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
+    @State private var selectedDrink: Drink?
     @State private var editingDrink: Drink?
-    @State private var ladderScale: CGFloat = 0.9
+    @State private var ladderScale: CGFloat = 0.52
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
 
@@ -56,6 +57,24 @@ struct CollectionView: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay {
+            if let selectedDrink {
+                FloatingDrinkCardOverlay(
+                    drink: selectedDrink,
+                    onClose: {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+                            self.selectedDrink = nil
+                        }
+                    },
+                    onEdit: {
+                        editingDrink = selectedDrink
+                        self.selectedDrink = nil
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .zIndex(20)
+            }
+        }
         .navigationDestination(isPresented: editingDrinkBinding) {
             if let editingDrink {
                 DrinkFormView(mode: .edit(editingDrink)) {}
@@ -76,7 +95,9 @@ struct CollectionView: View {
                 entries: entries,
                 onTapDrink: { drink in
                     guard draggingDrink == nil, dragTranslation == .zero else { return }
-                    editingDrink = drink
+                    withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
+                        selectedDrink = drink
+                    }
                 },
                 onDragChanged: { drink, translation, isOverDelete in
                     if draggingDrink == nil {
@@ -154,50 +175,37 @@ struct CollectionView: View {
     }
 
     private func ladderEntries(in metrics: LadderMetrics) -> [LadderDrinkEntry] {
-        var bandUsage: [Int: (left: Int, right: Int)] = [:]
         var leftColumnBottoms: [CGFloat] = []
         var rightColumnBottoms: [CGFloat] = []
         let minimumVerticalSpacing: CGFloat = 76
-        let columnSpacing: CGFloat = 172
-        let nearestColumnDistance: CGFloat = 102
+        let columnSpacing: CGFloat = 148
+        let nearestColumnDistance: CGFloat = 86
 
         return sortedDrinks.map { drink in
             let y = yPosition(for: drink.rating, metrics: metrics)
-            let band = Int((y - metrics.plotTop) / 52)
-            let usage = bandUsage[band, default: (left: 0, right: 0)]
             let hash = stableHash(for: drink)
             let preferRight = hash.isMultiple(of: 2)
-            let side: LadderSide
-
-            if usage.left == usage.right {
-                side = preferRight ? .right : .left
-            } else {
-                side = usage.left < usage.right ? .left : .right
-            }
-
-            if side == .left {
-                bandUsage[band] = (left: usage.left + 1, right: usage.right)
-            } else {
-                bandUsage[band] = (left: usage.left, right: usage.right + 1)
-            }
+            let preferredSide: LadderSide = preferRight ? .right : .left
 
             let placement: CGPoint
-            if side == .left {
-                placement = placementPosition(
+            if preferredSide == .left {
+                placement = bestPlacement(
                     preferredY: y,
-                    side: side,
+                    preferredSide: .left,
                     metrics: metrics,
-                    columnBottoms: &leftColumnBottoms,
+                    preferredColumnBottoms: &leftColumnBottoms,
+                    alternateColumnBottoms: &rightColumnBottoms,
                     nearestColumnDistance: nearestColumnDistance,
                     columnSpacing: columnSpacing,
                     minimumVerticalSpacing: minimumVerticalSpacing
                 )
             } else {
-                placement = placementPosition(
+                placement = bestPlacement(
                     preferredY: y,
-                    side: side,
+                    preferredSide: .right,
                     metrics: metrics,
-                    columnBottoms: &rightColumnBottoms,
+                    preferredColumnBottoms: &rightColumnBottoms,
+                    alternateColumnBottoms: &leftColumnBottoms,
                     nearestColumnDistance: nearestColumnDistance,
                     columnSpacing: columnSpacing,
                     minimumVerticalSpacing: minimumVerticalSpacing
@@ -214,17 +222,74 @@ struct CollectionView: View {
         }
     }
 
-    private func placementPosition(
+    private func bestPlacement(
         preferredY: CGFloat,
-        side: LadderSide,
+        preferredSide: LadderSide,
         metrics: LadderMetrics,
-        columnBottoms: inout [CGFloat],
+        preferredColumnBottoms: inout [CGFloat],
+        alternateColumnBottoms: inout [CGFloat],
         nearestColumnDistance: CGFloat,
         columnSpacing: CGFloat,
         minimumVerticalSpacing: CGFloat
     ) -> CGPoint {
         let maxColumn = max(0, Int((metrics.sideLaneWidth - nearestColumnDistance) / columnSpacing))
 
+        if let placement = placementPosition(
+            preferredY: preferredY,
+            side: preferredSide,
+            metrics: metrics,
+            columnBottoms: &preferredColumnBottoms,
+            maxColumn: maxColumn,
+            nearestColumnDistance: nearestColumnDistance,
+            columnSpacing: columnSpacing,
+            minimumVerticalSpacing: minimumVerticalSpacing,
+            allowsFallbackShift: false
+        ) {
+            return placement
+        }
+
+        let alternateSide: LadderSide = preferredSide == .left ? .right : .left
+        if let placement = placementPosition(
+            preferredY: preferredY,
+            side: alternateSide,
+            metrics: metrics,
+            columnBottoms: &alternateColumnBottoms,
+            maxColumn: maxColumn,
+            nearestColumnDistance: nearestColumnDistance,
+            columnSpacing: columnSpacing,
+            minimumVerticalSpacing: minimumVerticalSpacing,
+            allowsFallbackShift: false
+        ) {
+            return placement
+        }
+
+        return placementPosition(
+            preferredY: preferredY,
+            side: preferredSide,
+            metrics: metrics,
+            columnBottoms: &preferredColumnBottoms,
+            maxColumn: maxColumn,
+            nearestColumnDistance: nearestColumnDistance,
+            columnSpacing: columnSpacing,
+            minimumVerticalSpacing: minimumVerticalSpacing,
+            allowsFallbackShift: true
+        ) ?? CGPoint(
+            x: xPosition(for: preferredSide, column: maxColumn, metrics: metrics, nearestColumnDistance: nearestColumnDistance, columnSpacing: columnSpacing),
+            y: preferredY
+        )
+    }
+
+    private func placementPosition(
+        preferredY: CGFloat,
+        side: LadderSide,
+        metrics: LadderMetrics,
+        columnBottoms: inout [CGFloat],
+        maxColumn: Int,
+        nearestColumnDistance: CGFloat,
+        columnSpacing: CGFloat,
+        minimumVerticalSpacing: CGFloat,
+        allowsFallbackShift: Bool
+    ) -> CGPoint? {
         for column in 0...maxColumn {
             if column >= columnBottoms.count {
                 columnBottoms.append(-.greatestFiniteMagnitude)
@@ -239,6 +304,7 @@ struct CollectionView: View {
             }
         }
 
+        guard allowsFallbackShift else { return nil }
         let fallbackColumn = maxColumn
         let adjustedY = min(metrics.plotBottom, columnBottoms[fallbackColumn] + minimumVerticalSpacing)
         columnBottoms[fallbackColumn] = adjustedY
@@ -598,7 +664,7 @@ private struct LadderAxisView: View {
                 path.move(to: CGPoint(x: metrics.centerX, y: metrics.plotTop))
                 path.addLine(to: CGPoint(x: metrics.centerX, y: metrics.plotBottom))
             }
-            .stroke(.black.opacity(0.78), style: StrokeStyle(lineWidth: 1.4, lineCap: .round))
+            .stroke(.black.opacity(0.26), style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [5, 10]))
 
             ForEach(0...5, id: \.self) { score in
                 let y = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight
