@@ -3,61 +3,27 @@ import SwiftUI
 import UIKit
 
 struct CollectionView: View {
-    fileprivate enum SortMode: String, CaseIterable, Identifiable {
-        case brand = "品牌"
-        case rating = "评分"
-
-        var id: String { rawValue }
-    }
-
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Drink.createdAt, order: .reverse) private var drinks: [Drink]
-    @AppStorage("collectionSortMode") private var sortModeRaw = SortMode.rating.rawValue
+    @State private var showsLadderLabels = false
     @State private var draggingDrink: Drink?
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
+    @State private var editingDrink: Drink?
+    @State private var ladderScale: CGFloat = 1
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
 
-    private let columns = [
-        GridItem(.adaptive(minimum: 132), spacing: 16)
-    ]
-
-    private var sortMode: SortMode {
-        SortMode(rawValue: sortModeRaw) ?? .rating
+    private var effectiveLadderScale: CGFloat {
+        min(2.35, max(0.86, ladderScale))
     }
 
-    private var sortModeBinding: Binding<SortMode> {
-        Binding {
-            sortMode
-        } set: { newValue in
-            sortModeRaw = newValue.rawValue
-        }
-    }
-
-    private var groupedDrinks: [(title: String, drinks: [Drink])] {
-        switch sortMode {
-        case .brand:
-            return Dictionary(grouping: drinks) {
-                $0.brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未分类品牌" : $0.brand
+    private var sortedDrinks: [Drink] {
+        drinks.sorted {
+            if $0.rating == $1.rating {
+                return $0.createdAt > $1.createdAt
             }
-            .map {
-                (
-                    title: $0.key,
-                    drinks: $0.value.sorted { $0.rating == $1.rating ? $0.createdAt > $1.createdAt : $0.rating > $1.rating }
-                )
-            }
-            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-
-        case .rating:
-            return Dictionary(grouping: drinks) { ratingGroupTitle(for: $0.rating) }
-                .map {
-                    (
-                        title: $0.key,
-                        drinks: $0.value.sorted { $0.rating == $1.rating ? $0.createdAt > $1.createdAt : $0.rating > $1.rating }
-                    )
-                }
-                .sorted { ratingGroupRank($0.title) > ratingGroupRank($1.title) }
+            return $0.rating > $1.rating
         }
     }
 
@@ -69,56 +35,11 @@ struct CollectionView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 30) {
-                        ForEach(groupedDrinks, id: \.title) { group in
-                            VStack(alignment: .leading, spacing: 16) {
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text(group.title)
-                                        .font(.title2.bold())
-                                    Text("\(group.drinks.count) 杯")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                LazyVGrid(columns: columns, spacing: 20) {
-                                    ForEach(group.drinks) { drink in
-                                        NavigationLink {
-                                            DrinkFormView(mode: .edit(drink)) {}
-                                        } label: {
-                                            DrinkCardView(drink: drink)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .scaleEffect(draggingDrink === drink ? 1.05 : 1)
-                                        .offset(draggingDrink === drink ? dragTranslation : .zero)
-                                        .rotationEffect(.degrees(draggingDrink === drink ? -2 : 0))
-                                        .shadow(
-                                            color: draggingDrink === drink ? .black.opacity(0.16) : .clear,
-                                            radius: draggingDrink === drink ? 18 : 0,
-                                            y: draggingDrink === drink ? 10 : 0
-                                        )
-                                        .zIndex(draggingDrink === drink ? 10 : 0)
-                                        .highPriorityGesture(deleteGesture(for: drink))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 18)
-                    .padding(.bottom, 96)
-                }
+                ratingLadder
             }
         }
         .background(Color(.systemGroupedBackground))
         .toolbar(.hidden, for: .navigationBar)
-        .overlay(alignment: .topTrailing) {
-            if !drinks.isEmpty {
-                SortMenu(selection: sortModeBinding)
-                    .padding(.top, 10)
-                    .padding(.trailing, 14)
-            }
-        }
         .overlay(alignment: .bottomTrailing) {
             CaptureBookmark(onCapture: {
                 onStartCapture()
@@ -135,65 +56,138 @@ struct CollectionView: View {
                     .allowsHitTesting(false)
             }
         }
-    }
-
-    private func ratingGroupTitle(for rating: Double) -> String {
-        if rating >= 5 {
-            return "5 分"
+        .navigationDestination(isPresented: editingDrinkBinding) {
+            if let editingDrink {
+                DrinkFormView(mode: .edit(editingDrink)) {}
+            }
         }
-        return "\(Int(floor(rating))) 分段"
     }
 
-    private func ratingGroupRank(_ title: String) -> Int {
-        Int(title.prefix(1)) ?? -1
-    }
+    private var ratingLadder: some View {
+        GeometryReader { proxy in
+            let metrics = LadderMetrics(size: proxy.size)
+            let entries = ladderEntries(in: metrics)
 
-    private func deleteGesture(for drink: Drink) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.35)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
-            .onChanged { value in
-                switch value {
-                case .first(true):
+            ZoomableLadderView(
+                zoomScale: $ladderScale,
+                showsLabels: $showsLadderLabels,
+                entries: entries,
+                onTapDrink: { drink in
+                    guard draggingDrink == nil, dragTranslation == .zero else { return }
+                    editingDrink = drink
+                },
+                onDragChanged: { drink, translation, isOverDelete in
                     if draggingDrink == nil {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.8)) {
-                        draggingDrink = drink
-                    }
 
-                case .second(true, let drag?):
                     draggingDrink = drink
-                    dragTranslation = drag.translation
-                    let isActive = drag.translation.height > 150
-                    if isActive != isOverDeleteTarget {
-                        UIImpactFeedbackGenerator(style: isActive ? .medium : .light).impactOccurred()
+                    dragTranslation = translation
+                    if isOverDelete != isOverDeleteTarget {
+                        UIImpactFeedbackGenerator(style: isOverDelete ? .medium : .light).impactOccurred()
                     }
                     withAnimation(.spring(response: 0.22, dampingFraction: 0.86)) {
-                        isOverDeleteTarget = isActive
+                        isOverDeleteTarget = isOverDelete
+                    }
+                },
+                onDragEnded: { drink, shouldDelete in
+                    if shouldDelete, let drink {
+                        delete(drink)
                     }
 
-                default:
-                    break
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                        draggingDrink = nil
+                        dragTranslation = .zero
+                        isOverDeleteTarget = false
+                    }
                 }
-            }
-            .onEnded { value in
-                let shouldDelete: Bool
-                if case .second(true, let drag?) = value {
-                    shouldDelete = drag.translation.height > 150
-                } else {
-                    shouldDelete = false
-                }
+            ) {
+                ZStack {
+                    LadderAxisView(metrics: metrics)
 
-                if shouldDelete {
-                    delete(drink)
+                    ForEach(entries) { entry in
+                        LadderDrinkNode(drink: entry.drink, showsLabels: showsLadderLabels)
+                            .scaleEffect(draggingDrink === entry.drink ? 1.12 : 1)
+                            .offset(draggingDrink === entry.drink ? dragTranslation : .zero)
+                            .shadow(
+                                color: draggingDrink === entry.drink ? .black.opacity(0.18) : .clear,
+                                radius: draggingDrink === entry.drink ? 16 : 0,
+                                y: draggingDrink === entry.drink ? 9 : 0
+                            )
+                            .position(entry.position)
+                            .zIndex(draggingDrink === entry.drink ? 10 : 1)
+                            .allowsHitTesting(false)
+                    }
                 }
-
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                    draggingDrink = nil
-                    dragTranslation = .zero
-                    isOverDeleteTarget = false
-                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .contentShape(Rectangle())
             }
+            .background(Color(.systemGroupedBackground))
+            .accessibilityLabel("评分天梯图")
+        }
+    }
+
+    private var editingDrinkBinding: Binding<Bool> {
+        Binding {
+            editingDrink != nil
+        } set: { isPresented in
+            if !isPresented {
+                editingDrink = nil
+            }
+        }
+    }
+
+    private func ladderEntries(in metrics: LadderMetrics) -> [LadderDrinkEntry] {
+        var bandUsage: [Int: (left: Int, right: Int)] = [:]
+
+        return sortedDrinks.map { drink in
+            let y = yPosition(for: drink.rating, metrics: metrics)
+            let band = Int((y - metrics.plotTop) / 44)
+            let usage = bandUsage[band, default: (left: 0, right: 0)]
+            let hash = stableHash(for: drink)
+            let preferRight = hash.isMultiple(of: 2)
+            let side: LadderSide
+
+            if usage.left == usage.right {
+                side = preferRight ? .right : .left
+            } else {
+                side = usage.left < usage.right ? .left : .right
+            }
+
+            let sideIndex = side == .left ? usage.left : usage.right
+            if side == .left {
+                bandUsage[band] = (left: usage.left + 1, right: usage.right)
+            } else {
+                bandUsage[band] = (left: usage.left, right: usage.right + 1)
+            }
+
+            let stagger = CGFloat(sideIndex % 4) * 25
+            let row = CGFloat((sideIndex / 4) % 3)
+            let jitter = CGFloat(hash % 17) - 8
+            let distance = min(metrics.sideLaneWidth, 58 + stagger + abs(jitter))
+            let x = side == .left ? metrics.centerX - distance : metrics.centerX + distance
+            let shiftedY = y + (row - 1) * 9 + CGFloat((hash / 17) % 7) - 3
+
+            return LadderDrinkEntry(
+                drink: drink,
+                position: CGPoint(
+                    x: min(max(46, x), metrics.size.width - 46),
+                    y: min(max(metrics.plotTop, shiftedY), metrics.plotBottom)
+                )
+            )
+        }
+    }
+
+    private func yPosition(for rating: Double, metrics: LadderMetrics) -> CGFloat {
+        let clamped = min(5, max(0, rating))
+        return metrics.plotTop + (5 - clamped) / 5 * metrics.plotHeight
+    }
+
+    private func stableHash(for drink: Drink) -> Int {
+        let key = "\(drink.brand)|\(drink.name)|\(drink.createdAt.timeIntervalSince1970)"
+        return key.unicodeScalars.reduce(0) { partial, scalar in
+            abs((partial * 31 + Int(scalar.value)) % 10_000)
+        }
     }
 
     private func delete(_ drink: Drink) {
@@ -202,6 +196,375 @@ struct CollectionView: View {
         modelContext.delete(drink)
         try? modelContext.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+}
+
+private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
+    @Binding var zoomScale: CGFloat
+    @Binding var showsLabels: Bool
+    let entries: [LadderDrinkEntry]
+    let onTapDrink: (Drink) -> Void
+    let onDragChanged: (Drink, CGSize, Bool) -> Void
+    let onDragEnded: (Drink?, Bool) -> Void
+    @ViewBuilder var content: Content
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            zoomScale: $zoomScale,
+            showsLabels: $showsLabels,
+            onTapDrink: onTapDrink,
+            onDragChanged: onDragChanged,
+            onDragEnded: onDragEnded
+        )
+    }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.pinchGestureRecognizer?.delegate = context.coordinator
+        scrollView.delaysContentTouches = false
+        scrollView.canCancelContentTouches = true
+
+        let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        tapGesture.delegate = context.coordinator
+        tapGesture.cancelsTouchesInView = false
+        scrollView.addGestureRecognizer(tapGesture)
+
+        let longPressGesture = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
+        longPressGesture.minimumPressDuration = 0.35
+        longPressGesture.delegate = context.coordinator
+        longPressGesture.cancelsTouchesInView = false
+        scrollView.addGestureRecognizer(longPressGesture)
+
+        scrollView.minimumZoomScale = 0.86
+        scrollView.maximumZoomScale = 2.35
+        scrollView.zoomScale = zoomScale
+        scrollView.bouncesZoom = true
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.layer.drawsAsynchronously = true
+
+        let hostingController = context.coordinator.hostingController
+        hostingController.view.backgroundColor = .clear
+        hostingController.view.layer.drawsAsynchronously = true
+        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(hostingController.view)
+        context.coordinator.hostedView = hostingController.view
+
+        NSLayoutConstraint.activate([
+            hostingController.view.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            hostingController.view.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            hostingController.view.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            hostingController.view.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            hostingController.view.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            hostingController.view.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
+        ])
+
+        context.coordinator.scrollView = scrollView
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        context.coordinator.hostingController.rootView = AnyView(content)
+        context.coordinator.zoomScale = $zoomScale
+        context.coordinator.showsLabels = $showsLabels
+        context.coordinator.entries = entries
+
+        if !context.coordinator.isZooming,
+           abs(scrollView.zoomScale - zoomScale) > 0.001 {
+            scrollView.setZoomScale(zoomScale, animated: false)
+        }
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+        var zoomScale: Binding<CGFloat>
+        var showsLabels: Binding<Bool>
+        var entries: [LadderDrinkEntry] = []
+        let onTapDrink: (Drink) -> Void
+        let onDragChanged: (Drink, CGSize, Bool) -> Void
+        let onDragEnded: (Drink?, Bool) -> Void
+        let hostingController: UIHostingController<AnyView>
+        weak var hostedView: UIView?
+        weak var scrollView: UIScrollView?
+        var isZooming = false
+        var longPressedDrink: Drink?
+        var longPressStartPoint: CGPoint = .zero
+
+        init(
+            zoomScale: Binding<CGFloat>,
+            showsLabels: Binding<Bool>,
+            onTapDrink: @escaping (Drink) -> Void,
+            onDragChanged: @escaping (Drink, CGSize, Bool) -> Void,
+            onDragEnded: @escaping (Drink?, Bool) -> Void
+        ) {
+            self.zoomScale = zoomScale
+            self.showsLabels = showsLabels
+            self.onTapDrink = onTapDrink
+            self.onDragChanged = onDragChanged
+            self.onDragEnded = onDragEnded
+            hostingController = UIHostingController(rootView: AnyView(EmptyView()))
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            hostedView
+        }
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended,
+                  recognizer.numberOfTouches <= 1,
+                  !isZooming,
+                  let scrollView,
+                  let entry = entry(at: recognizer.location(in: scrollView)) else {
+                return
+            }
+            onTapDrink(entry.drink)
+        }
+
+        @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+            guard !isZooming, let scrollView else { return }
+            let point = recognizer.location(in: scrollView)
+
+            switch recognizer.state {
+            case .began:
+                guard let entry = entry(at: point) else { return }
+                longPressedDrink = entry.drink
+                longPressStartPoint = point
+
+            case .changed:
+                guard let drink = longPressedDrink else { return }
+                let translation = CGSize(
+                    width: point.x - longPressStartPoint.x,
+                    height: point.y - longPressStartPoint.y
+                )
+                onDragChanged(drink, translation, translation.height > 150)
+
+            case .ended:
+                let translation = CGSize(
+                    width: point.x - longPressStartPoint.x,
+                    height: point.y - longPressStartPoint.y
+                )
+                onDragEnded(longPressedDrink, translation.height > 150)
+                longPressedDrink = nil
+
+            case .cancelled, .failed:
+                onDragEnded(longPressedDrink, false)
+                longPressedDrink = nil
+
+            default:
+                break
+            }
+        }
+
+        private func entry(at scrollViewPoint: CGPoint) -> LadderDrinkEntry? {
+            guard let scrollView, let hostedView else { return nil }
+            let contentPoint = hostedView.convert(scrollViewPoint, from: scrollView)
+            return entries
+                .reversed()
+                .first { entry in
+                    let size = showsLabels.wrappedValue ? CGSize(width: 118, height: 94) : CGSize(width: 54, height: 54)
+                    let frame = CGRect(
+                        x: entry.position.x - size.width / 2,
+                        y: entry.position.y - size.height / 2,
+                        width: size.width,
+                        height: size.height
+                    ).insetBy(dx: -10, dy: -10)
+                    return frame.contains(contentPoint)
+                }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            if gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer {
+                guard let scrollView else { return false }
+                return entry(at: touch.location(in: scrollView)) != nil
+            }
+            return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            gestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIPinchGestureRecognizer
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            false
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            !(gestureRecognizer is UIPinchGestureRecognizer)
+        }
+
+        func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+            isZooming = true
+            hostedView?.layer.rasterizationScale = UIScreen.main.scale
+            hostedView?.layer.shouldRasterize = true
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {}
+
+        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            hostedView?.layer.shouldRasterize = false
+            isZooming = false
+            zoomScale.wrappedValue = scale
+
+            let shouldShowLabels = scale > 1.2
+            if showsLabels.wrappedValue != shouldShowLabels {
+                showsLabels.wrappedValue = shouldShowLabels
+            }
+        }
+    }
+}
+
+private enum LadderSide {
+    case left
+    case right
+}
+
+private struct LadderMetrics {
+    let size: CGSize
+    let plotTop: CGFloat
+    let plotBottom: CGFloat
+    let centerX: CGFloat
+    let sideLaneWidth: CGFloat
+
+    init(size: CGSize) {
+        self.size = size
+        plotTop = 66
+        plotBottom = max(plotTop + 280, size.height - 118)
+        centerX = size.width / 2
+        sideLaneWidth = max(62, min(170, size.width * 0.34))
+    }
+
+    var plotHeight: CGFloat {
+        plotBottom - plotTop
+    }
+}
+
+private struct LadderDrinkEntry: Identifiable {
+    let drink: Drink
+    let position: CGPoint
+
+    var id: ObjectIdentifier {
+        ObjectIdentifier(drink)
+    }
+}
+
+private struct LadderAxisView: View {
+    let metrics: LadderMetrics
+
+    var body: some View {
+        ZStack {
+            Path { path in
+                path.move(to: CGPoint(x: metrics.centerX, y: metrics.plotTop))
+                path.addLine(to: CGPoint(x: metrics.centerX, y: metrics.plotBottom))
+            }
+            .stroke(.black.opacity(0.8), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+
+            ForEach(0...5, id: \.self) { score in
+                let y = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight
+
+                Path { path in
+                    path.move(to: CGPoint(x: metrics.centerX - 36, y: y))
+                    path.addLine(to: CGPoint(x: metrics.centerX + 36, y: y))
+                }
+                .stroke(.black.opacity(score == 0 || score == 5 ? 0.82 : 0.34), style: StrokeStyle(lineWidth: score == 0 || score == 5 ? 1.8 : 1.2, lineCap: .round))
+
+                Text("\(score)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.black.opacity(0.64))
+                    .frame(width: 28)
+                    .position(x: metrics.centerX - 55, y: y)
+            }
+        }
+    }
+}
+
+private struct LadderDrinkNode: View {
+    let drink: Drink
+    let showsLabels: Bool
+
+    var body: some View {
+        VStack(spacing: 5) {
+            stickerBadge
+
+            if showsLabels {
+                VStack(spacing: 1) {
+                    Text(displayName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    Text(displayBrand)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(.white.opacity(0.92))
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
+                .frame(width: 112)
+                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+            }
+        }
+        .frame(width: showsLabels ? 118 : 54, height: showsLabels ? 94 : 54, alignment: .top)
+        .contentShape(Rectangle())
+        .accessibilityLabel("\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", drink.rating))")
+    }
+
+    @ViewBuilder
+    private var stickerBadge: some View {
+        ZStack {
+            Circle()
+                .fill(.white.opacity(0.94))
+                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+
+            if let image = ImageStore.load(drink.stickerImageName) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(5)
+            } else {
+                Image(systemName: "cup.and.saucer.fill")
+                    .font(.system(size: 21))
+                    .foregroundStyle(.brown.opacity(0.62))
+            }
+        }
+        .frame(width: 46, height: 46)
+        .overlay(
+            Circle()
+                .stroke(.black.opacity(0.12), lineWidth: 1)
+        )
+        .overlay(alignment: .bottomTrailing) {
+            Text(String(format: "%.2f", drink.rating))
+                .font(.system(size: 8, weight: .bold, design: .rounded).monospacedDigit())
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(.black.opacity(0.78))
+                .clipShape(Capsule())
+                .offset(x: 5, y: 3)
+        }
+    }
+
+    private var displayName: String {
+        let cleaned = drink.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "未命名" : cleaned
+    }
+
+    private var displayBrand: String {
+        let cleaned = drink.brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "未知品牌" : cleaned
     }
 }
 
@@ -221,32 +584,6 @@ private struct DeleteDropZone: View {
         .background(isActive ? Color.red : Color.white.opacity(0.96))
         .clipShape(Capsule())
         .shadow(color: .black.opacity(0.14), radius: 18, y: 8)
-    }
-}
-
-private struct SortMenu: View {
-    @Binding var selection: CollectionView.SortMode
-
-    var body: some View {
-        Menu {
-            Picker("排列", selection: $selection) {
-                ForEach(CollectionView.SortMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: "arrow.up.arrow.down")
-                Text(selection.rawValue)
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.white.opacity(0.92))
-            .clipShape(Capsule())
-            .shadow(color: .black.opacity(0.08), radius: 10, y: 4)
-        }
     }
 }
 
