@@ -5,7 +5,6 @@ import UIKit
 struct CollectionView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Drink.createdAt, order: .reverse) private var drinks: [Drink]
-    @State private var showsLadderLabels = false
     @State private var draggingDrink: Drink?
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
@@ -90,7 +89,6 @@ struct CollectionView: View {
 
             ZoomableLadderView(
                 zoomScale: $ladderScale,
-                showsLabels: $showsLadderLabels,
                 contentSize: canvasSize,
                 entries: entries,
                 onTapDrink: { drink in
@@ -129,7 +127,7 @@ struct CollectionView: View {
                     LadderAxisView(metrics: metrics)
 
                     ForEach(entries) { entry in
-                        LadderDrinkNode(drink: entry.drink, showsLabels: showsLadderLabels)
+                        LadderDrinkNode(drink: entry.drink, labelVisibility: labelVisibility)
                             .scaleEffect(nodeCounterScale)
                             .scaleEffect(draggingDrink === entry.drink ? 1.12 : 1)
                             .offset(draggingDrink === entry.drink ? dragTranslation : .zero)
@@ -163,6 +161,13 @@ struct CollectionView: View {
 
     private var nodeCounterScale: CGFloat {
         1 / pow(max(effectiveLadderScale, 0.01), 0.52)
+    }
+
+    private var labelVisibility: CGFloat {
+        let lowerBound: CGFloat = 1.18
+        let upperBound: CGFloat = 1.42
+        let progress = (effectiveLadderScale - lowerBound) / (upperBound - lowerBound)
+        return min(1, max(0, progress))
     }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
@@ -348,7 +353,6 @@ struct CollectionView: View {
 
 private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     @Binding var zoomScale: CGFloat
-    @Binding var showsLabels: Bool
     let contentSize: CGSize
     let entries: [LadderDrinkEntry]
     let onTapDrink: (Drink) -> Void
@@ -359,7 +363,6 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator(
             zoomScale: $zoomScale,
-            showsLabels: $showsLabels,
             onTapDrink: onTapDrink,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded
@@ -374,6 +377,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         scrollView.canCancelContentTouches = true
 
         let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
+        tapGesture.numberOfTouchesRequired = 1
         tapGesture.delegate = context.coordinator
         tapGesture.cancelsTouchesInView = false
         scrollView.addGestureRecognizer(tapGesture)
@@ -383,6 +387,11 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         longPressGesture.delegate = context.coordinator
         longPressGesture.cancelsTouchesInView = false
         scrollView.addGestureRecognizer(longPressGesture)
+
+        if let pinchGesture = scrollView.pinchGestureRecognizer {
+            tapGesture.require(toFail: pinchGesture)
+            longPressGesture.require(toFail: pinchGesture)
+        }
 
         scrollView.minimumZoomScale = 0.52
         scrollView.maximumZoomScale = 2.4
@@ -423,7 +432,6 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         context.coordinator.hostingController.rootView = AnyView(content)
         context.coordinator.zoomScale = $zoomScale
-        context.coordinator.showsLabels = $showsLabels
         context.coordinator.entries = entries
         context.coordinator.contentSize = contentSize
         context.coordinator.widthConstraint?.constant = contentSize.width
@@ -441,7 +449,6 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var zoomScale: Binding<CGFloat>
-        var showsLabels: Binding<Bool>
         var entries: [LadderDrinkEntry] = []
         let onTapDrink: (Drink) -> Void
         let onDragChanged: (Drink, CGSize, Bool) -> Void
@@ -457,16 +464,16 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         var lastReportedZoomScale: CGFloat = 0
         var longPressedDrink: Drink?
         var longPressStartPoint: CGPoint = .zero
+        var lastZoomInteractionAt = Date.distantPast
+        private let zoomGestureCooldown: TimeInterval = 0.3
 
         init(
             zoomScale: Binding<CGFloat>,
-            showsLabels: Binding<Bool>,
             onTapDrink: @escaping (Drink) -> Void,
             onDragChanged: @escaping (Drink, CGSize, Bool) -> Void,
             onDragEnded: @escaping (Drink?, Bool) -> Void
         ) {
             self.zoomScale = zoomScale
-            self.showsLabels = showsLabels
             self.onTapDrink = onTapDrink
             self.onDragChanged = onDragChanged
             self.onDragEnded = onDragEnded
@@ -479,8 +486,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended,
-                  recognizer.numberOfTouches <= 1,
-                  !isZooming,
+                  canStartDrinkGesture,
                   let scrollView,
                   let entry = entry(at: recognizer.location(in: scrollView)) else {
                 return
@@ -489,7 +495,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-            guard !isZooming, let scrollView else { return }
+            guard canStartDrinkGesture, let scrollView else { return }
             let point = recognizer.location(in: scrollView)
 
             switch recognizer.state {
@@ -529,20 +535,20 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             return entries
                 .reversed()
                 .first { entry in
-                    let size = showsLabels.wrappedValue ? CGSize(width: 160, height: 62) : CGSize(width: 38, height: 38)
+                    let size = CGSize(width: 44, height: 44)
                     let frame = CGRect(
                         x: entry.position.x - size.width / 2,
-                        y: entry.position.y - size.height / 2,
+                        y: entry.position.y - size.height / 2 + 2,
                         width: size.width,
                         height: size.height
-                    ).insetBy(dx: -10, dy: -10)
+                    ).insetBy(dx: -4, dy: -4)
                     return frame.contains(contentPoint)
                 }
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             if gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer {
-                guard let scrollView else { return false }
+                guard canStartDrinkGesture, let scrollView else { return false }
                 return entry(at: touch.location(in: scrollView)) != nil
             }
             return true
@@ -552,14 +558,20 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
-            gestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIPinchGestureRecognizer
+            if isDrinkGesture(gestureRecognizer) || isDrinkGesture(otherGestureRecognizer) {
+                return false
+            }
+            return gestureRecognizer is UIPinchGestureRecognizer || otherGestureRecognizer is UIPinchGestureRecognizer
         }
 
         func gestureRecognizer(
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool {
-            false
+            if isDrinkGesture(gestureRecognizer), otherGestureRecognizer is UIPinchGestureRecognizer {
+                return true
+            }
+            return false
         }
 
         func gestureRecognizer(
@@ -571,32 +583,36 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
             isZooming = true
+            lastZoomInteractionAt = Date()
             hostedView?.layer.rasterizationScale = UIScreen.main.scale
             hostedView?.layer.shouldRasterize = true
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            lastZoomInteractionAt = Date()
             if abs(scrollView.zoomScale - lastReportedZoomScale) > 0.045 {
                 zoomScale.wrappedValue = scrollView.zoomScale
                 lastReportedZoomScale = scrollView.zoomScale
-            }
-
-            let shouldShowLabels = scrollView.zoomScale > 1.32
-            if showsLabels.wrappedValue != shouldShowLabels {
-                showsLabels.wrappedValue = shouldShowLabels
             }
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             hostedView?.layer.shouldRasterize = false
             isZooming = false
+            lastZoomInteractionAt = Date()
             zoomScale.wrappedValue = scale
             lastReportedZoomScale = scale
+        }
 
-            let shouldShowLabels = scale > 1.32
-            if showsLabels.wrappedValue != shouldShowLabels {
-                showsLabels.wrappedValue = shouldShowLabels
-            }
+        private var canStartDrinkGesture: Bool {
+            guard !isZooming else { return false }
+            guard Date().timeIntervalSince(lastZoomInteractionAt) > zoomGestureCooldown else { return false }
+            guard let pinchState = scrollView?.pinchGestureRecognizer?.state else { return true }
+            return pinchState == .possible || pinchState == .failed || pinchState == .cancelled
+        }
+
+        private func isDrinkGesture(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer
         }
 
         func centerInitialPositionIfNeeded() {
@@ -700,36 +716,40 @@ private struct LadderAxisView: View {
 
 private struct LadderDrinkNode: View {
     let drink: Drink
-    let showsLabels: Bool
+    let labelVisibility: CGFloat
 
     var body: some View {
         VStack(spacing: 3) {
             stickerBadge
 
-            if showsLabels {
-                VStack(spacing: 1) {
-                    Text(displayName)
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    Text(displayBrand)
-                        .font(.system(size: 8))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(.white.opacity(0.9))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .shadow(color: .black.opacity(0.06), radius: 6, y: 2)
-                .frame(width: labelWidth)
-                .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
-            }
+            labelView
+                .opacity(Double(labelOpacity))
+                .offset(y: (1 - labelVisibility) * -3)
+                .allowsHitTesting(labelVisibility > 0.92)
         }
-        .frame(width: showsLabels ? labelWidth : 32, height: showsLabels ? 58 : 32, alignment: .top)
+        .frame(width: labelWidth, height: 58, alignment: .top)
         .contentShape(Rectangle())
         .accessibilityLabel("\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", drink.rating))")
+    }
+
+    private var labelView: some View {
+        VStack(spacing: 1) {
+            Text(displayName)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+
+            Text(displayBrand)
+                .font(.system(size: 8))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(.white.opacity(0.9))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .shadow(color: .black.opacity(Double(labelOpacity) * 0.06), radius: 6, y: 2)
+        .frame(width: labelWidth)
     }
 
     @ViewBuilder
@@ -780,6 +800,11 @@ private struct LadderDrinkNode: View {
     private var labelWidth: CGFloat {
         let longest = max(displayName.count, displayBrand.count)
         return min(156, max(76, CGFloat(longest) * 10 + 24))
+    }
+
+    private var labelOpacity: CGFloat {
+        let eased = labelVisibility * labelVisibility * (3 - 2 * labelVisibility)
+        return eased
     }
 }
 
