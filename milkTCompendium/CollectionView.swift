@@ -255,6 +255,10 @@ private struct CaptureBookmark: View {
     let onPhotoImport: () -> Void
     @State private var dragOffset: CGSize = .zero
     @State private var isPhotoImportGesture = false
+    @State private var morphProgress: CGFloat = 0
+    @State private var previousIcon: CaptureMorphIcon = .camera
+    @State private var targetIcon: CaptureMorphIcon = .camera
+    @State private var iconTransitionStartedAt = Date.distantPast
 
     private let leverWidth: CGFloat = 88
     private let leverHeight: CGFloat = 18
@@ -265,33 +269,28 @@ private struct CaptureBookmark: View {
     private let importThreshold: CGFloat = -34
 
     var body: some View {
-        ZStack(alignment: .leading) {
-            UnevenRoundedRectangle(
-                cornerRadii: RectangleCornerRadii(
-                    topLeading: leverHeight / 2,
-                    bottomLeading: leverHeight / 2,
-                    bottomTrailing: 4,
-                    topTrailing: 4
-                ),
-                style: .continuous
-            )
+        ZStack {
+            leverShape
                 .fill(.white)
                 .frame(width: leverWidth, height: leverHeight)
-                .overlay {
-                    UnevenRoundedRectangle(
-                        cornerRadii: RectangleCornerRadii(
-                            topLeading: leverHeight / 2,
-                            bottomLeading: leverHeight / 2,
-                            bottomTrailing: 4,
-                            topTrailing: 4
-                        ),
-                        style: .continuous
-                    )
-                    .stroke(isPhotoImportGesture ? .blue : .black, lineWidth: 1.5)
-                }
+                .opacity(1 - delayedFadeOut(morphProgress, delay: 0.18))
 
+            leverShape
+                .stroke(isPhotoImportGesture ? .blue : .black, lineWidth: 1.5)
+                .frame(width: leverWidth, height: leverHeight)
+                .opacity(1 - min(1, morphProgress * 1.85))
+
+            BubbleMorphView(
+                progress: morphProgress,
+                previousTarget: previousIcon,
+                target: targetIcon,
+                targetTransitionStartedAt: iconTransitionStartedAt,
+                isHighlighted: isPhotoImportGesture,
+                size: CGSize(width: leverWidth, height: animationHeight),
+                barHeight: leverHeight
+            )
         }
-        .frame(width: leverWidth, height: leverHeight, alignment: .leading)
+        .frame(width: leverWidth, height: animationHeight)
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
         .offset(x: tuckedOffset + dragOffset.width, y: dragOffset.height)
         .contentShape(Rectangle())
@@ -302,6 +301,8 @@ private struct CaptureBookmark: View {
                     let canLift = horizontal < -maxReveal * 0.72
                     let vertical = canLift ? max(-maxLift, min(0, value.translation.height)) : 0
                     let isImporting = vertical < importThreshold
+                    let horizontalProgress = min(1, abs(horizontal) / abs(captureThreshold))
+                    let verticalProgress = min(1, abs(vertical) / abs(importThreshold))
 
                     if isImporting != isPhotoImportGesture {
                         UIImpactFeedbackGenerator(style: isImporting ? .medium : .light).impactOccurred()
@@ -309,6 +310,8 @@ private struct CaptureBookmark: View {
 
                     dragOffset = CGSize(width: horizontal, height: vertical)
                     isPhotoImportGesture = isImporting
+                    updateTargetIcon(verticalProgress > 0.2 ? .photo : .camera)
+                    morphProgress = max(horizontalProgress, verticalProgress)
                 }
                 .onEnded { value in
                     let horizontal = max(-maxReveal, min(0, value.translation.width))
@@ -324,6 +327,10 @@ private struct CaptureBookmark: View {
                     withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
                         dragOffset = .zero
                         isPhotoImportGesture = false
+                        morphProgress = 0
+                        previousIcon = .camera
+                        targetIcon = .camera
+                        iconTransitionStartedAt = .distantPast
                     }
                 }
         )
@@ -332,5 +339,242 @@ private struct CaptureBookmark: View {
         }
         .accessibilityLabel("拍一杯")
         .accessibilityHint("点按或向左拉动打开相机，拉出后向上推打开相册")
+    }
+
+    private var animationHeight: CGFloat {
+        54
+    }
+
+    private var leverShape: some Shape {
+        UnevenRoundedRectangle(
+            cornerRadii: RectangleCornerRadii(
+                topLeading: leverHeight / 2,
+                bottomLeading: leverHeight / 2,
+                bottomTrailing: 4,
+                topTrailing: 4
+            ),
+            style: .continuous
+        )
+    }
+
+    private func delayedFadeOut(_ value: CGFloat, delay: CGFloat) -> CGFloat {
+        let adjusted = max(0, min(1, (value - delay) / (1 - delay)))
+        return adjusted * adjusted * (3 - 2 * adjusted)
+    }
+
+    private func updateTargetIcon(_ newTarget: CaptureMorphIcon) {
+        guard newTarget != targetIcon else { return }
+        previousIcon = targetIcon
+        targetIcon = newTarget
+        iconTransitionStartedAt = Date()
+    }
+}
+
+private enum CaptureMorphIcon {
+    case camera
+    case photo
+}
+
+private struct BubbleMorphView: View {
+    let progress: CGFloat
+    let previousTarget: CaptureMorphIcon
+    let target: CaptureMorphIcon
+    let targetTransitionStartedAt: Date
+    let isHighlighted: Bool
+    let size: CGSize
+    let barHeight: CGFloat
+
+    private let particleCount = 92
+    private let barWidth: CGFloat = 88
+    private let targetTransitionDuration: TimeInterval = 0.38
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            Canvas { context, size in
+                let elapsed = timeline.date.timeIntervalSinceReferenceDate
+                let easedProgress = easeInOut(progress)
+                let targetTransition = transitionProgress(at: timeline.date)
+                let bubbleColor = isHighlighted ? Color.blue : Color.black
+
+                for index in 0..<particleCount {
+                    let start = startPoint(index: index, size: size)
+                    let finish = morphedTargetPoint(index: index, size: size, targetTransition: targetTransition)
+                    let delay = CGFloat((index % 11)) * 0.012
+                    let localProgress = min(1, max(0, (easedProgress - delay) / (1 - delay)))
+                    let drift = driftOffset(index: index, elapsed: elapsed, progress: localProgress)
+                    let point = CGPoint(
+                        x: start.x + (finish.x - start.x) * localProgress + drift.width,
+                        y: start.y + (finish.y - start.y) * localProgress + drift.height
+                    )
+                    let radius = 0.8 + seeded(index, salt: 8) * 1.1 + localProgress * 0.7
+                    let breakIn = min(1, max(0, easedProgress / 0.16))
+                    let opacity = Double(breakIn) * (0.34 + Double(localProgress) * 0.6)
+                    let rect = CGRect(
+                        x: point.x - radius,
+                        y: point.y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )
+
+                    context.opacity = opacity
+                    context.fill(Path(ellipseIn: rect), with: .color(bubbleColor))
+                }
+            }
+        }
+        .frame(width: size.width, height: size.height)
+        .allowsHitTesting(false)
+    }
+
+    private func startPoint(index: Int, size: CGSize) -> CGPoint {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let leftRadius = barHeight / 2
+        let leftCenter = CGPoint(x: center.x - barWidth / 2 + leftRadius, y: center.y)
+        let right = center.x + barWidth / 2
+        let top = center.y - barHeight / 2
+        let bottom = center.y + barHeight / 2
+        let straightLeft = leftCenter.x
+        let straightRight = right - 4
+        let perimeter = (straightRight - straightLeft) * 2 + barHeight + .pi * leftRadius
+        let jitter = (seeded(index, salt: 11) - 0.5) * 0.58
+        var distance = (CGFloat(index) / CGFloat(particleCount)) * perimeter
+
+        if distance < straightRight - straightLeft {
+            return CGPoint(
+                x: straightLeft + distance,
+                y: top + jitter
+            )
+        }
+
+        distance -= straightRight - straightLeft
+        if distance < barHeight {
+            return CGPoint(
+                x: straightRight + jitter,
+                y: top + distance
+            )
+        }
+
+        distance -= barHeight
+        if distance < straightRight - straightLeft {
+            return CGPoint(
+                x: straightRight - distance,
+                y: bottom + jitter
+            )
+        }
+
+        distance -= straightRight - straightLeft
+        let angle = .pi / 2 + (distance / (.pi * leftRadius)) * .pi
+        return CGPoint(
+            x: leftCenter.x + cos(angle) * leftRadius + jitter,
+            y: leftCenter.y + sin(angle) * leftRadius
+        )
+    }
+
+    private func targetPoint(index: Int, target: CaptureMorphIcon, size: CGSize) -> CGPoint {
+        let points = target == .camera ? cameraPoints(in: size) : photoPoints(in: size)
+        return points[index % points.count]
+    }
+
+    private func morphedTargetPoint(index: Int, size: CGSize, targetTransition: CGFloat) -> CGPoint {
+        let from = targetPoint(index: index, target: previousTarget, size: size)
+        let to = targetPoint(index: index, target: target, size: size)
+        let progress = iconEase(targetTransition)
+        return CGPoint(
+            x: from.x + (to.x - from.x) * progress,
+            y: from.y + (to.y - from.y) * progress
+        )
+    }
+
+    private func transitionProgress(at date: Date) -> CGFloat {
+        guard previousTarget != target else { return 1 }
+        let elapsed = date.timeIntervalSince(targetTransitionStartedAt)
+        return min(1, max(0, CGFloat(elapsed / targetTransitionDuration)))
+    }
+
+    private func cameraPoints(in size: CGSize) -> [CGPoint] {
+        let center = CGPoint(x: size.width * 0.45, y: size.height / 2)
+        let w: CGFloat = 42
+        let h: CGFloat = 26
+        let left = center.x - w / 2
+        let right = center.x + w / 2
+        let top = center.y - h / 2
+        let bottom = center.y + h / 2
+        let lensRadius: CGFloat = 7.5
+
+        var points: [CGPoint] = []
+        points += sampleLine(from: CGPoint(x: left + 5, y: top), to: CGPoint(x: right - 5, y: top), count: 18)
+        points += sampleLine(from: CGPoint(x: right, y: top + 5), to: CGPoint(x: right, y: bottom - 5), count: 10)
+        points += sampleLine(from: CGPoint(x: right - 5, y: bottom), to: CGPoint(x: left + 5, y: bottom), count: 18)
+        points += sampleLine(from: CGPoint(x: left, y: bottom - 5), to: CGPoint(x: left, y: top + 5), count: 10)
+        points += sampleLine(from: CGPoint(x: left + 8, y: top - 5), to: CGPoint(x: left + 18, y: top - 5), count: 8)
+        points += sampleCircle(center: center, radius: lensRadius, count: 22)
+        points += sampleCircle(center: CGPoint(x: right - 8, y: top + 7), radius: 2.2, count: 6)
+        return points
+    }
+
+    private func photoPoints(in size: CGSize) -> [CGPoint] {
+        let center = CGPoint(x: size.width * 0.45, y: size.height / 2)
+        let w: CGFloat = 42
+        let h: CGFloat = 28
+        let left = center.x - w / 2
+        let right = center.x + w / 2
+        let top = center.y - h / 2
+        let bottom = center.y + h / 2
+
+        var points: [CGPoint] = []
+        points += sampleLine(from: CGPoint(x: left, y: top), to: CGPoint(x: right, y: top), count: 18)
+        points += sampleLine(from: CGPoint(x: right, y: top), to: CGPoint(x: right, y: bottom), count: 12)
+        points += sampleLine(from: CGPoint(x: right, y: bottom), to: CGPoint(x: left, y: bottom), count: 18)
+        points += sampleLine(from: CGPoint(x: left, y: bottom), to: CGPoint(x: left, y: top), count: 12)
+        points += sampleLine(from: CGPoint(x: left + 5, y: bottom - 5), to: CGPoint(x: left + 15, y: bottom - 15), count: 9)
+        points += sampleLine(from: CGPoint(x: left + 15, y: bottom - 15), to: CGPoint(x: left + 24, y: bottom - 7), count: 8)
+        points += sampleLine(from: CGPoint(x: left + 24, y: bottom - 7), to: CGPoint(x: right - 7, y: bottom - 17), count: 10)
+        points += sampleLine(from: CGPoint(x: right - 7, y: bottom - 17), to: CGPoint(x: right - 3, y: bottom - 5), count: 7)
+        points += sampleCircle(center: CGPoint(x: right - 10, y: top + 8), radius: 2.4, count: 7)
+        return points
+    }
+
+    private func sampleLine(from start: CGPoint, to end: CGPoint, count: Int) -> [CGPoint] {
+        guard count > 1 else { return [start] }
+        return (0..<count).map { index in
+            let progress = CGFloat(index) / CGFloat(count - 1)
+            return CGPoint(
+                x: start.x + (end.x - start.x) * progress,
+                y: start.y + (end.y - start.y) * progress
+            )
+        }
+    }
+
+    private func sampleCircle(center: CGPoint, radius: CGFloat, count: Int) -> [CGPoint] {
+        (0..<count).map { index in
+            let angle = CGFloat(index) / CGFloat(count) * .pi * 2
+            return CGPoint(
+                x: center.x + cos(angle) * radius,
+                y: center.y + sin(angle) * radius
+            )
+        }
+    }
+
+    private func driftOffset(index: Int, elapsed: TimeInterval, progress: CGFloat) -> CGSize {
+        let phase = elapsed * (1.4 + Double(seeded(index, salt: 3)) * 1.6) + Double(index) * 0.7
+        let looseness = sin(.pi * Double(progress))
+        return CGSize(
+            width: cos(phase) * looseness * 2.4,
+            height: sin(phase * 1.17) * looseness * 2.1
+        )
+    }
+
+    private func easeInOut(_ value: CGFloat) -> CGFloat {
+        let clamped = min(1, max(0, value))
+        return clamped * clamped * (3 - 2 * clamped)
+    }
+
+    private func iconEase(_ value: CGFloat) -> CGFloat {
+        let clamped = min(1, max(0, value))
+        return clamped * clamped * (3 - 2 * clamped)
+    }
+
+    private func seeded(_ index: Int, salt: Int) -> CGFloat {
+        let value = (index * 73 + salt * 151) % 997
+        return CGFloat(value) / 996
     }
 }
