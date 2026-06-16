@@ -2,7 +2,7 @@ import SwiftData
 import SwiftUI
 
 @main
-struct MTBookApp: App {
+struct milkTCompendiumApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
