@@ -150,6 +150,7 @@ struct FloatingDrinkCardOverlay: View {
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
         }
+        .padding(.horizontal, 10)
     }
 
     private var displayBrand: String {
@@ -164,6 +165,6 @@ struct FloatingDrinkCardOverlay: View {
 
     private var displayNote: String {
         let cleaned = drink.note.trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "备注" : cleaned
+        return cleaned.isEmpty ? "无" : cleaned
     }
 }
