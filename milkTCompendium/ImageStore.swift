@@ -30,6 +30,11 @@ enum ImageStore {
         guard let name else { return nil }
         return UIImage(contentsOfFile: directory.appendingPathComponent(name).path)
     }
+
+    static func delete(_ name: String?) {
+        guard let name else { return }
+        try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+    }
 }
 
 enum ImageStoreError: LocalizedError {

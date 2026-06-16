@@ -1,33 +1,60 @@
+import PhotosUI
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
-    @State private var selectedTab = 0
     @State private var showingNewDrink = false
+    @State private var showingCamera = false
+    @State private var showingPhotoPicker = false
+    @State private var pendingCapturedImage: UIImage?
+    @State private var photoItem: PhotosPickerItem?
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            NavigationStack {
-                CollectionView(showingNewDrink: $showingNewDrink)
-            }
-            .tabItem {
-                Label("图鉴", systemImage: "square.grid.2x2.fill")
-            }
-            .tag(0)
-
-            NavigationStack {
-                DrinkFormView(mode: .standalone) {
-                    selectedTab = 0
-                }
-            }
-            .tabItem {
-                Label("记录", systemImage: "plus.circle.fill")
-            }
-            .tag(1)
+        NavigationStack {
+            CollectionView(onStartCapture: {
+                showingCamera = true
+            }, onStartPhotoImport: {
+                showingPhotoPicker = true
+            })
         }
         .tint(.primary)
-        .sheet(isPresented: $showingNewDrink) {
+        .preferredColorScheme(.light)
+        .photosPicker(isPresented: $showingPhotoPicker, selection: $photoItem, matching: .images)
+        .onChange(of: photoItem) { _, item in
+            guard let item else { return }
+            Task {
+                do {
+                    guard let data = try await item.loadTransferable(type: Data.self),
+                          let image = UIImage(data: data) else {
+                        return
+                    }
+                    await MainActor.run {
+                        pendingCapturedImage = image
+                        photoItem = nil
+                        showingNewDrink = true
+                    }
+                } catch {
+                    await MainActor.run {
+                        photoItem = nil
+                    }
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showingCamera, onDismiss: {
+            if pendingCapturedImage != nil {
+                showingNewDrink = true
+            }
+        }) {
+            CameraPicker { image in
+                pendingCapturedImage = image
+            }
+            .ignoresSafeArea()
+        }
+        .sheet(isPresented: $showingNewDrink, onDismiss: {
+            pendingCapturedImage = nil
+        }) {
             NavigationStack {
-                DrinkFormView(mode: .sheet) {
+                DrinkFormView(mode: .create, initialImage: pendingCapturedImage) {
                     showingNewDrink = false
                 }
             }

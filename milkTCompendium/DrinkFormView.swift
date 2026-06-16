@@ -5,14 +5,16 @@ import UIKit
 
 struct DrinkFormView: View {
     enum Mode {
-        case standalone
-        case sheet
+        case create
+        case edit(Drink)
     }
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
     let mode: Mode
+    let initialImage: UIImage?
+    let startWithCamera: Bool
     let onSaved: () -> Void
 
     @State private var brand = ""
@@ -27,7 +29,11 @@ struct DrinkFormView: View {
     @State private var stickerImage: UIImage?
     @State private var photoItem: PhotosPickerItem?
     @State private var showingCamera = false
+    @State private var didAutoStartCamera = false
+    @State private var didProcessInitialImage = false
+    @State private var didChangeImage = false
     @State private var showingBrandPicker = false
+    @State private var showingStickerPreview = false
     @State private var isProcessing = false
     @State private var didRecognizeUsefulInformation = false
     @State private var nameCandidates: [String] = []
@@ -35,6 +41,25 @@ struct DrinkFormView: View {
 
     private let sweetnessOptions = ["全糖", "正常糖", "少糖", "七分糖", "半糖", "三分糖", "微糖", "无糖", "不另外加糖"]
     private let iceOptions = ["多冰", "正常冰", "少冰", "微冰", "去冰", "常温", "温", "热"]
+
+    init(mode: Mode, initialImage: UIImage? = nil, startWithCamera: Bool = false, onSaved: @escaping () -> Void) {
+        self.mode = mode
+        self.initialImage = initialImage
+        self.startWithCamera = startWithCamera
+        self.onSaved = onSaved
+
+        if case .edit(let drink) = mode {
+            _brand = State(initialValue: drink.brand)
+            _name = State(initialValue: drink.name)
+            _sweetness = State(initialValue: drink.sweetness)
+            _iceLevel = State(initialValue: drink.iceLevel)
+            _rating = State(initialValue: drink.rating)
+            _consumedAt = State(initialValue: drink.consumedAt)
+            _location = State(initialValue: drink.location)
+            _originalImage = State(initialValue: ImageStore.load(drink.originalImageName))
+            _stickerImage = State(initialValue: ImageStore.load(drink.stickerImageName))
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -49,15 +74,30 @@ struct DrinkFormView: View {
             .padding(.vertical, 14)
         }
         .background(Color(.systemGroupedBackground))
-        .navigationTitle("记录")
+        .navigationTitle(isEditing ? "编辑" : "记录")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            if mode == .sheet {
+            if !isEditing {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") {
                         dismiss()
                     }
                 }
+            }
+        }
+        .onAppear {
+            if let initialImage, !didProcessInitialImage, !isEditing {
+                didProcessInitialImage = true
+                Task { await process(initialImage) }
+                return
+            }
+
+            guard startWithCamera, !didAutoStartCamera, !isEditing else { return }
+            didAutoStartCamera = true
+            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                showingCamera = true
+            } else {
+                errorMessage = "当前设备没有可用相机。"
             }
         }
         .sheet(isPresented: $showingCamera) {
@@ -71,8 +111,13 @@ struct DrinkFormView: View {
                 BrandPickerView(selection: $brand)
             }
         }
+        .sheet(isPresented: $showingStickerPreview) {
+            if let stickerImage {
+                StickerPreviewView(image: stickerImage)
+            }
+        }
         .onChange(of: photoItem) { _, item in
-            guard let item else { return }
+            guard !isEditing, let item else { return }
             Task {
                 do {
                     guard let data = try await item.loadTransferable(type: Data.self),
@@ -102,10 +147,26 @@ struct DrinkFormView: View {
                     .fill(.white)
 
                 if let stickerImage {
-                    Image(uiImage: stickerImage)
-                        .resizable()
-                        .scaledToFit()
-                        .padding(18)
+                    Button {
+                        showingStickerPreview = true
+                    } label: {
+                        ZStack(alignment: .bottomTrailing) {
+                            Image(uiImage: stickerImage)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(18)
+
+                            Image(systemName: "plus.magnifyingglass")
+                                .font(.system(size: 17, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .padding(10)
+                                .background(.white.opacity(0.92))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
+                                .padding(14)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 } else if let originalImage {
                     Image(uiImage: originalImage)
                         .resizable()
@@ -136,11 +197,13 @@ struct DrinkFormView: View {
             .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
 
             HStack(spacing: 12) {
-                PhotosPicker(selection: $photoItem, matching: .images) {
-                    Label("相册", systemImage: "photo")
-                        .frame(maxWidth: .infinity)
+                if !isEditing {
+                    PhotosPicker(selection: $photoItem, matching: .images) {
+                        Label("相册", systemImage: "photo")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
 
                 Button {
                     if UIImagePickerController.isSourceTypeAvailable(.camera) {
@@ -149,7 +212,7 @@ struct DrinkFormView: View {
                         errorMessage = "当前设备没有可用相机。"
                     }
                 } label: {
-                    Label("拍照", systemImage: "camera")
+                    Label(isEditing ? "重新拍照" : "拍照", systemImage: "camera")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -202,7 +265,8 @@ struct DrinkFormView: View {
         Button {
             save()
         } label: {
-            Text("加入图鉴")
+            Text(isEditing ? "保存" : "加入图鉴")
+                .contentTransition(.numericText())
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)
@@ -214,11 +278,15 @@ struct DrinkFormView: View {
     }
 
     private var canSave: Bool {
-        originalImage != nil
-            && stickerImage != nil
+        (isEditing || (originalImage != nil && stickerImage != nil))
             && !brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !isProcessing
+    }
+
+    private var isEditing: Bool {
+        if case .edit = mode { return true }
+        return false
     }
 
     @MainActor
@@ -232,6 +300,7 @@ struct DrinkFormView: View {
 
         do {
             let processed = try await DrinkImageProcessor.process(image)
+            didChangeImage = true
             stickerImage = processed.sticker
             apply(DrinkLabelParser.parse(processed.recognizedText, knownBrands: BrandStore.allKnownBrands))
         } catch {
@@ -266,26 +335,46 @@ struct DrinkFormView: View {
     }
 
     private func save() {
-        guard let originalImage, let stickerImage else { return }
+        let cleanedBrand = brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            let originalName = try ImageStore.saveOriginal(originalImage)
-            let stickerName = try ImageStore.saveSticker(stickerImage)
-            let drink = Drink(
-                brand: brand.trimmingCharacters(in: .whitespacesAndNewlines),
-                name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-                sweetness: sweetness,
-                iceLevel: iceLevel,
-                rating: rating,
-                consumedAt: consumedAt,
-                location: location.trimmingCharacters(in: .whitespacesAndNewlines),
-                originalImageName: originalName,
-                stickerImageName: stickerName
-            )
-            modelContext.insert(drink)
+            switch mode {
+            case .create:
+                guard let originalImage, let stickerImage else { return }
+                let originalName = try ImageStore.saveOriginal(originalImage)
+                let stickerName = try ImageStore.saveSticker(stickerImage)
+                let drink = Drink(
+                    brand: cleanedBrand,
+                    name: cleanedName,
+                    sweetness: sweetness,
+                    iceLevel: iceLevel,
+                    rating: rating,
+                    consumedAt: consumedAt,
+                    location: location.trimmingCharacters(in: .whitespacesAndNewlines),
+                    originalImageName: originalName,
+                    stickerImageName: stickerName
+                )
+                modelContext.insert(drink)
+
+            case .edit(let drink):
+                drink.brand = cleanedBrand
+                drink.name = cleanedName
+                drink.sweetness = sweetness
+                drink.iceLevel = iceLevel
+                drink.rating = rating
+                drink.consumedAt = consumedAt
+                drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if didChangeImage, let originalImage, let stickerImage {
+                    drink.originalImageName = try ImageStore.saveOriginal(originalImage)
+                    drink.stickerImageName = try ImageStore.saveSticker(stickerImage)
+                }
+            }
             try modelContext.save()
-            BrandStore.remember(drink.brand)
+            BrandStore.remember(cleanedBrand)
             reset()
             onSaved()
+            dismiss()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -302,8 +391,78 @@ struct DrinkFormView: View {
         originalImage = nil
         stickerImage = nil
         photoItem = nil
+        didChangeImage = false
         didRecognizeUsefulInformation = false
         nameCandidates = []
+    }
+}
+
+private struct StickerPreviewView: View {
+    @Environment(\.dismiss) private var dismiss
+    let image: UIImage
+
+    var body: some View {
+        NavigationStack {
+            ZoomableImageView(image: image)
+                .background(Color(.systemGroupedBackground))
+                .navigationTitle("贴图")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") {
+                            dismiss()
+                        }
+                    }
+                }
+        }
+        .preferredColorScheme(.light)
+    }
+}
+
+private struct ZoomableImageView: UIViewRepresentable {
+    let image: UIImage
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 5
+        scrollView.bouncesZoom = true
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+
+        let imageView = UIImageView(image: image)
+        imageView.contentMode = .scaleAspectFit
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.addSubview(imageView)
+        context.coordinator.imageView = imageView
+
+        NSLayoutConstraint.activate([
+            imageView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            imageView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            imageView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            imageView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            imageView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+            imageView.heightAnchor.constraint(equalTo: scrollView.frameLayoutGuide.heightAnchor)
+        ])
+
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        context.coordinator.imageView?.image = image
+    }
+
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        var imageView: UIImageView?
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            imageView
+        }
     }
 }
 
