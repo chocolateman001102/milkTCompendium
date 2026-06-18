@@ -5,14 +5,74 @@ import UIKit
 struct NearbyPeer: Identifiable, Hashable {
     let peerID: MCPeerID
     let stableID: String
+    let ownerName: String
+    let drinkCount: Int
+    let averageRating: Double
+    let exportedAt: Date?
 
     var id: String {
         stableID
     }
 
     var name: String {
-        peerID.displayName
+        ownerName.isEmpty ? peerID.displayName : ownerName
     }
+}
+
+struct NearbyLocalSummary {
+    let ownerID: String
+    let ownerName: String
+    let drinkCount: Int
+    let averageRating: Double
+    let exportedAt: Date
+
+    var discoveryInfo: [String: String] {
+        [
+            "ownerID": ownerID,
+            "ownerName": ownerName,
+            "drinkCount": "\(drinkCount)",
+            "averageRating": String(format: "%.2f", averageRating),
+            "exportedAt": ISO8601DateFormatter().string(from: exportedAt),
+            "packageVersion": "\(SharedCompendiumStore.packageVersion)"
+        ]
+    }
+}
+
+struct NearbyInvitation: Identifiable {
+    enum Mode {
+        case receivingCompendium
+        case sharingMine
+
+        var title: String {
+            switch self {
+            case .receivingCompendium:
+                return "接收图鉴"
+            case .sharingMine:
+                return "发送图鉴"
+            }
+        }
+    }
+
+    let id = UUID()
+    let peerName: String
+    let mode: Mode
+}
+
+private struct NearbyInviteContext: Codable {
+    enum Action: String, Codable {
+        case sendCompendium
+        case requestCompendium
+    }
+
+    let action: Action
+}
+
+private struct NearbyControlMessage: Codable {
+    enum Action: String, Codable {
+        case requestCompendium
+    }
+
+    let action: Action
 }
 
 enum NearbyDisplayNameStore {
@@ -75,33 +135,36 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     @Published private(set) var peers: [NearbyPeer] = []
     @Published private(set) var statusMessage = "正在寻找附近设备"
     @Published private(set) var isSending = false
+    @Published var pendingInvitation: NearbyInvitation?
 
     var onReceivedPackage: ((URL) -> Void)?
+    var makePackageData: (() async throws -> Data)?
 
     private static let serviceType = "mtc-share"
-    private let stablePeerID: String
+    private let summary: NearbyLocalSummary
     private let localPeerID: MCPeerID
     private let session: MCSession
-    private let advertiserAssistant: MCAdvertiserAssistant
+    private let advertiser: MCNearbyServiceAdvertiser
     private let browser: MCNearbyServiceBrowser
+    private var pendingInvitationHandler: ((Bool, MCSession?) -> Void)?
     private var pendingResourceURL: URL?
     private var pendingPeerID: MCPeerID?
+    private var pendingRequestPeerID: MCPeerID?
     private var sendTimeoutID: UUID?
 
-    init(displayName: String = NearbyDisplayNameStore.displayName) {
-        let cleanedName = NearbyDisplayNameStore.cleanDisplayName(displayName)
-        stablePeerID = NearbyDisplayNameStore.stablePeerID
-        localPeerID = MCPeerID(displayName: cleanedName)
+    init(summary: NearbyLocalSummary) {
+        self.summary = summary
+        localPeerID = MCPeerID(displayName: summary.ownerName)
         session = MCSession(peer: localPeerID, securityIdentity: nil, encryptionPreference: .required)
-        advertiserAssistant = MCAdvertiserAssistant(
-            serviceType: Self.serviceType,
-            discoveryInfo: ["peerID": stablePeerID],
-            session: session
+        advertiser = MCNearbyServiceAdvertiser(
+            peer: localPeerID,
+            discoveryInfo: summary.discoveryInfo,
+            serviceType: Self.serviceType
         )
         browser = MCNearbyServiceBrowser(peer: localPeerID, serviceType: Self.serviceType)
         super.init()
         session.delegate = self
-        advertiserAssistant.delegate = self
+        advertiser.delegate = self
         browser.delegate = self
     }
 
@@ -110,19 +173,16 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func start() {
-        advertiserAssistant.start()
+        advertiser.startAdvertisingPeer()
         browser.startBrowsingForPeers()
+        statusMessage = "正在寻找附近设备"
     }
 
     func stop() {
         sendTimeoutID = nil
         browser.stopBrowsingForPeers()
-        advertiserAssistant.stop()
-    }
-
-    func prepareToSend(to peer: NearbyPeer) {
-        isSending = true
-        statusMessage = "正在打包要发送给 \(peer.name) 的图鉴"
+        advertiser.stopAdvertisingPeer()
+        session.disconnect()
     }
 
     func prepareToShare() {
@@ -135,6 +195,54 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         statusMessage = "图鉴文件已准备好"
     }
 
+    func sendMine(to peer: NearbyPeer) {
+        statusMessage = "正在连接 \(peer.name)"
+        isSending = true
+        pendingPeerID = peer.peerID
+        if session.connectedPeers.contains(peer.peerID) {
+            prepareAndSendPackage(to: peer.peerID)
+            return
+        }
+        invite(peer, action: .sendCompendium)
+    }
+
+    func requestCompendium(from peer: NearbyPeer) {
+        statusMessage = "正在请求 \(peer.name) 的图鉴"
+        isSending = true
+        pendingRequestPeerID = peer.peerID
+        if session.connectedPeers.contains(peer.peerID) {
+            sendRequestMessage(to: peer.peerID)
+            scheduleSendTimeout(for: peer)
+            return
+        }
+        invite(peer, action: .requestCompendium)
+    }
+
+    func acceptInvitation() {
+        pendingInvitationHandler?(true, session)
+        pendingInvitationHandler = nil
+        pendingInvitation = nil
+        statusMessage = "正在建立连接"
+    }
+
+    func declineInvitation() {
+        pendingInvitationHandler?(false, nil)
+        pendingInvitationHandler = nil
+        pendingInvitation = nil
+        statusMessage = "已拒绝邀请"
+    }
+
+    func disconnect(from peer: NearbyPeer) {
+        if session.connectedPeers.contains(peer.peerID) {
+            session.disconnect()
+        }
+        sendTimeoutID = nil
+        pendingPeerID = nil
+        pendingRequestPeerID = nil
+        isSending = false
+        statusMessage = "已断开 \(peer.name)"
+    }
+
     func failPendingSend(_ message: String) {
         isSending = false
         if let pendingResourceURL {
@@ -143,85 +251,55 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         sendTimeoutID = nil
         pendingResourceURL = nil
         pendingPeerID = nil
+        pendingRequestPeerID = nil
         statusMessage = message
     }
 
-    func sendPackageData(_ data: Data, to peer: NearbyPeer) throws {
-        guard !data.isEmpty else {
-            statusMessage = "没有可发送的图鉴数据"
-            return
-        }
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mtcpack")
-        try data.write(to: url, options: .atomic)
-
-        pendingResourceURL = url
-        pendingPeerID = peer.peerID
-        isSending = true
-        statusMessage = "已准备图鉴，正在连接 \(peer.name)"
-
-        if session.connectedPeers.contains(peer.peerID) {
-            sendPendingResource()
-        } else {
-            browser.invitePeer(peer.peerID, to: session, withContext: nil, timeout: 30)
-            scheduleSendTimeout(for: peer)
-        }
+    private func invite(_ peer: NearbyPeer, action: NearbyInviteContext.Action) {
+        let context = NearbyInviteContext(action: action)
+        let data = try? JSONEncoder().encode(context)
+        browser.invitePeer(peer.peerID, to: session, withContext: data, timeout: 30)
+        scheduleSendTimeout(for: peer)
     }
 
-    func prepareSystemBrowserSend(_ data: Data, targetName: String?) throws {
-        guard !data.isEmpty else {
-            statusMessage = "没有可发送的图鉴数据"
+    private func prepareAndSendPackage(to peerID: MCPeerID) {
+        guard let makePackageData else {
+            failPendingSend("没有可发送的图鉴数据")
             return
         }
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mtcpack")
-        try data.write(to: url, options: .atomic)
-
-        pendingResourceURL = url
-        pendingPeerID = nil
         isSending = true
-        browser.stopBrowsingForPeers()
-
-        if let connectedPeer = session.connectedPeers.first {
-            pendingPeerID = connectedPeer
-            statusMessage = "已连接 \(connectedPeer.displayName)，正在发送图鉴"
-            sendPendingResource()
-        } else {
-            let targetText = targetName.map { "给 \($0)" } ?? ""
-            statusMessage = "请在系统窗口中选择\(targetText)要发送的设备"
+        statusMessage = "正在打包图鉴"
+        Task {
+            do {
+                let data = try await makePackageData()
+                try Task.checkCancellation()
+                let url = try await Self.writeTemporaryPackage(data)
+                await MainActor.run {
+                    self.pendingResourceURL = url
+                    self.pendingPeerID = peerID
+                    self.sendPendingResource()
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self.failPendingSend("发送已取消")
+                }
+            } catch {
+                await MainActor.run {
+                    self.failPendingSend("发送失败：\(error.localizedDescription)")
+                }
+            }
         }
     }
 
-    func makeSystemBrowserViewController(delegate: MCBrowserViewControllerDelegate) -> MCBrowserViewController {
-        let controller = MCBrowserViewController(serviceType: Self.serviceType, session: session)
-        controller.delegate = delegate
-        controller.minimumNumberOfPeers = 1
-        controller.maximumNumberOfPeers = 1
-        return controller
-    }
-
-    func sendToFirstConnectedPeerIfReady() {
-        guard pendingResourceURL != nil else { return }
-        if pendingPeerID == nil {
-            pendingPeerID = session.connectedPeers.first
-        }
-        sendPendingResource()
-    }
-
-    func cancelSystemBrowserSelectionIfNeeded() {
-        guard pendingResourceURL != nil, pendingPeerID == nil else { return }
-        failPendingSend("已取消连接")
-    }
-
-    func resumePeerBrowsing() {
-        browser.startBrowsingForPeers()
-    }
-
-    func shouldShowSystemPeer(_ peerID: MCPeerID, discoveryInfo: [String: String]?) -> Bool {
-        discoveryInfo?["peerID"] != stablePeerID
+    private static func writeTemporaryPackage(_ data: Data) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension("mtcpack")
+            try data.write(to: url, options: .atomic)
+            return url
+        }.value
     }
 
     private func sendPendingResource() {
@@ -238,7 +316,6 @@ final class NearbyTransferManager: NSObject, ObservableObject {
                 self?.isSending = false
                 self?.pendingResourceURL = nil
                 self?.pendingPeerID = nil
-                self?.sendTimeoutID = nil
                 try? FileManager.default.removeItem(at: url)
                 if let error {
                     self?.statusMessage = "发送失败：\(error.localizedDescription)"
@@ -246,6 +323,17 @@ final class NearbyTransferManager: NSObject, ObservableObject {
                     self?.statusMessage = "已发送"
                 }
             }
+        }
+    }
+
+    private func sendRequestMessage(to peerID: MCPeerID) {
+        let message = NearbyControlMessage(action: .requestCompendium)
+        guard let data = try? JSONEncoder().encode(message) else { return }
+        do {
+            try session.send(data, toPeers: [peerID], with: .reliable)
+            statusMessage = "已请求对方图鉴"
+        } catch {
+            failPendingSend("请求失败：\(error.localizedDescription)")
         }
     }
 
@@ -258,10 +346,10 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     private func scheduleSendTimeout(for peer: NearbyPeer) {
         let timeoutID = UUID()
         sendTimeoutID = timeoutID
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
             guard let self,
                   self.sendTimeoutID == timeoutID,
-                  self.pendingPeerID == peer.peerID,
+                  self.pendingPeerID == peer.peerID || self.pendingRequestPeerID == peer.peerID,
                   !self.session.connectedPeers.contains(peer.peerID) else {
                 return
             }
@@ -273,9 +361,18 @@ final class NearbyTransferManager: NSObject, ObservableObject {
 extension NearbyTransferManager: MCNearbyServiceBrowserDelegate {
     func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String: String]?) {
         DispatchQueue.main.async {
-            guard let stableID = info?["peerID"], stableID != self.stablePeerID else { return }
-            let peer = NearbyPeer(peerID: peerID, stableID: stableID)
-            guard !self.peers.contains(peer) else { return }
+            guard let stableID = info?["ownerID"],
+                  stableID != self.summary.ownerID else { return }
+            let date = info?["exportedAt"].flatMap { ISO8601DateFormatter().date(from: $0) }
+            let peer = NearbyPeer(
+                peerID: peerID,
+                stableID: stableID,
+                ownerName: info?["ownerName"] ?? peerID.displayName,
+                drinkCount: Int(info?["drinkCount"] ?? "") ?? 0,
+                averageRating: Double(info?["averageRating"] ?? "") ?? 0,
+                exportedAt: date
+            )
+            self.peers.removeAll { $0.id == peer.id }
             self.peers.append(peer)
             self.peers.sort { $0.name < $1.name }
             self.statusMessage = "发现 \(peer.name)"
@@ -293,13 +390,24 @@ extension NearbyTransferManager: MCNearbyServiceBrowserDelegate {
     }
 }
 
-extension NearbyTransferManager: MCAdvertiserAssistantDelegate {
-    func advertiserAssistantWillPresentInvitation(_ advertiserAssistant: MCAdvertiserAssistant) {
-        updateStatus("收到连接邀请")
+extension NearbyTransferManager: MCNearbyServiceAdvertiserDelegate {
+    func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
+        updateStatus("广播失败：\(error.localizedDescription)")
     }
 
-    func advertiserAssistantDidDismissInvitation(_ advertiserAssistant: MCAdvertiserAssistant) {
-        updateStatus("邀请已处理")
+    func advertiser(
+        _ advertiser: MCNearbyServiceAdvertiser,
+        didReceiveInvitationFromPeer peerID: MCPeerID,
+        withContext context: Data?,
+        invitationHandler: @escaping (Bool, MCSession?) -> Void
+    ) {
+        DispatchQueue.main.async {
+            let invite = context.flatMap { try? JSONDecoder().decode(NearbyInviteContext.self, from: $0) }
+            let mode: NearbyInvitation.Mode = invite?.action == .requestCompendium ? .sharingMine : .receivingCompendium
+            self.pendingInvitationHandler = invitationHandler
+            self.pendingInvitation = NearbyInvitation(peerName: peerID.displayName, mode: mode)
+            self.statusMessage = "收到 \(peerID.displayName) 的邀请"
+        }
     }
 }
 
@@ -309,14 +417,15 @@ extension NearbyTransferManager: MCSessionDelegate {
             switch state {
             case .connected:
                 self.statusMessage = "已连接 \(peerID.displayName)"
-                if self.pendingResourceURL != nil, self.pendingPeerID == nil {
-                    self.pendingPeerID = peerID
+                if self.pendingPeerID == peerID {
+                    self.prepareAndSendPackage(to: peerID)
+                } else if self.pendingRequestPeerID == peerID {
+                    self.sendRequestMessage(to: peerID)
                 }
-                self.sendPendingResource()
             case .connecting:
                 self.statusMessage = "正在连接 \(peerID.displayName)"
             case .notConnected:
-                if self.pendingPeerID == peerID {
+                if self.pendingPeerID == peerID || self.pendingRequestPeerID == peerID {
                     self.failPendingSend("\(peerID.displayName) 已断开")
                 } else {
                     self.statusMessage = "\(peerID.displayName) 已断开"
@@ -343,14 +452,30 @@ extension NearbyTransferManager: MCSessionDelegate {
                 self.statusMessage = "接收失败"
                 return
             }
+            self.isSending = false
+            self.sendTimeoutID = nil
+            self.pendingRequestPeerID = nil
             self.statusMessage = "已收到 \(peerID.displayName) 的图鉴"
             self.onReceivedPackage?(localURL)
         }
     }
 
-    func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {}
+    func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
+        guard let message = try? JSONDecoder().decode(NearbyControlMessage.self, from: data),
+              message.action == .requestCompendium else { return }
+        DispatchQueue.main.async {
+            self.prepareAndSendPackage(to: peerID)
+        }
+    }
+
     func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {}
-    func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
+
+    func session(
+        _ session: MCSession,
+        didStartReceivingResourceWithName resourceName: String,
+        fromPeer peerID: MCPeerID,
+        with progress: Progress
+    ) {
         updateStatus("正在接收 \(peerID.displayName) 的图鉴")
     }
 }

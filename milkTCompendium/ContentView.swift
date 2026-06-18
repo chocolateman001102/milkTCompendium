@@ -128,24 +128,3 @@ private struct CapturedDrinkPhoto: Identifiable {
     let id = UUID()
     let image: UIImage
 }
-
-private extension Data {
-    func downsampledImage(maxDimension: CGFloat) throws -> UIImage {
-        let options = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithData(self as CFData, options) else {
-            throw ProcessingError.invalidImage
-        }
-
-        let thumbnailOptions = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: Int(maxDimension)
-        ] as CFDictionary
-
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
-            throw ProcessingError.invalidImage
-        }
-        return UIImage(cgImage: cgImage)
-    }
-}

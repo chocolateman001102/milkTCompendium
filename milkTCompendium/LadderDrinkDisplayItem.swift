@@ -31,6 +31,16 @@ struct LadderDrinkDisplayItem: Identifiable {
         return nil
     }
 
+    var stickerThumbnailImage: UIImage? {
+        if let stickerImageName {
+            return ImageStore.thumbnail(stickerImageName)
+        }
+        if let stickerFileURL {
+            return ImageStore.thumbnail(at: stickerFileURL)
+        }
+        return nil
+    }
+
     init(drink: Drink) {
         id = "local-\(drink.createdAt.timeIntervalSince1970)-\(drink.brand)-\(drink.name)"
         localDrink = drink

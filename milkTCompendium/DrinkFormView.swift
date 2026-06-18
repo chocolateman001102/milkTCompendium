@@ -13,6 +13,7 @@ struct DrinkFormView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Query(sort: \Drink.createdAt, order: .reverse) private var existingDrinks: [Drink]
 
     let mode: Mode
     let initialImage: UIImage?
@@ -39,6 +40,8 @@ struct DrinkFormView: View {
     @State private var showingBrandPicker = false
     @State private var showingStickerPreview = false
     @State private var isProcessing = false
+    @State private var isRecognizingText = false
+    @State private var duplicateCandidate: Drink?
     @State private var errorMessage: String?
 
     private let sweetnessOptions = ["全糖", "正常糖", "少糖", "七分糖", "半糖", "三分糖", "微糖", "无糖", "不另外加糖"]
@@ -144,6 +147,28 @@ struct DrinkFormView: View {
         } message: {
             Text(errorMessage ?? "")
         }
+        .alert("可能已经记录过", isPresented: Binding(
+            get: { duplicateCandidate != nil },
+            set: { if !$0 { duplicateCandidate = nil } }
+        )) {
+            Button("更新旧记录") {
+                if let duplicateCandidate {
+                    save(updating: duplicateCandidate)
+                }
+                duplicateCandidate = nil
+            }
+            Button("作为新记录") {
+                duplicateCandidate = nil
+                saveAsNew()
+            }
+            Button("取消", role: .cancel) {
+                duplicateCandidate = nil
+            }
+        } message: {
+            if let duplicateCandidate {
+                Text("\(duplicateCandidate.brand) · \(duplicateCandidate.name)\n评分 \(String(format: "%.2f", duplicateCandidate.rating))")
+            }
+        }
     }
 
     private var photoCard: some View {
@@ -220,6 +245,22 @@ struct DrinkFormView: View {
                 .buttonStyle(.borderedProminent)
             }
             .disabled(isProcessing)
+
+            if originalImage != nil {
+                Button {
+                    recognizeText()
+                } label: {
+                    if isRecognizingText {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Text("尝试识别")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(isProcessing || isRecognizingText)
+            }
         }
     }
 
@@ -294,6 +335,15 @@ struct DrinkFormView: View {
     }
 
     private func save() {
+        if case .create = mode,
+           let duplicate = duplicateDrinkCandidate() {
+            duplicateCandidate = duplicate
+            return
+        }
+        saveAsNew()
+    }
+
+    private func saveAsNew() {
         let cleanedBrand = brand.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
@@ -339,6 +389,91 @@ struct DrinkFormView: View {
             dismiss()
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func save(updating drink: Drink) {
+        guard let originalImage, let stickerImage else { return }
+        let cleanedBrand = brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        do {
+            ImageStore.delete(drink.originalImageName)
+            ImageStore.delete(drink.stickerImageName)
+            drink.brand = cleanedBrand
+            drink.name = cleanedName
+            drink.sweetness = sweetness
+            drink.iceLevel = iceLevel
+            drink.rating = rating
+            drink.consumedAt = consumedAt
+            drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
+            drink.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
+            drink.isLimited = isLimited
+            drink.originalImageName = try ImageStore.saveOriginal(originalImage)
+            drink.stickerImageName = try ImageStore.saveSticker(stickerImage)
+            try modelContext.save()
+            BrandStore.remember(cleanedBrand)
+            onSaved()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func duplicateDrinkCandidate() -> Drink? {
+        let cleanedBrand = normalizedIdentityText(brand)
+        let cleanedName = normalizedIdentityText(name)
+        guard cleanedBrand.count >= 2, cleanedName.count >= 2 else { return nil }
+
+        return existingDrinks.first { drink in
+            normalizedIdentityText(drink.brand) == cleanedBrand &&
+            normalizedIdentityText(drink.name) == cleanedName
+        }
+    }
+
+    private func normalizedIdentityText(_ text: String) -> String {
+        let folded = text.folding(options: [.widthInsensitive, .diacriticInsensitive, .caseInsensitive], locale: nil)
+        return folded
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: "·", with: "")
+            .replacingOccurrences(of: "・", with: "")
+    }
+
+    private func recognizeText() {
+        guard let image = originalImage else { return }
+        isRecognizingText = true
+        Task {
+            do {
+                let result = try await DrinkTextRecognizer.recognize(from: image)
+                await MainActor.run {
+                    applyRecognizedInfo(result)
+                    isRecognizingText = false
+                }
+            } catch {
+                await MainActor.run {
+                    isRecognizingText = false
+                    errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func applyRecognizedInfo(_ info: RecognizedDrinkInfo) {
+        if brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recognizedBrand = info.brand {
+            brand = recognizedBrand
+        }
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recognizedName = info.name {
+            name = recognizedName
+        }
+        if let recognizedSweetness = info.sweetness {
+            sweetness = recognizedSweetness
+        }
+        if let recognizedIceLevel = info.iceLevel {
+            iceLevel = recognizedIceLevel
         }
     }
 
@@ -410,27 +545,6 @@ private extension UIImage {
         return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
             draw(in: CGRect(origin: .zero, size: targetSize))
         }
-    }
-}
-
-private extension Data {
-    func downsampledImage(maxDimension: CGFloat) throws -> UIImage {
-        let options = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithData(self as CFData, options) else {
-            throw ProcessingError.invalidImage
-        }
-
-        let thumbnailOptions = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: Int(maxDimension)
-        ] as CFDictionary
-
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
-            throw ProcessingError.invalidImage
-        }
-        return UIImage(cgImage: cgImage)
     }
 }
 
