@@ -1,3 +1,5 @@
+import AVFoundation
+import ImageIO
 import PhotosUI
 import SwiftData
 import SwiftUI
@@ -74,6 +76,13 @@ struct DrinkFormView: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                hideKeyboard()
+            }
+        )
         .background(Color(.systemGroupedBackground))
         .navigationTitle(isEditing ? "编辑" : "记录")
         .navigationBarTitleDisplayMode(.inline)
@@ -95,11 +104,7 @@ struct DrinkFormView: View {
 
             guard startWithCamera, !didAutoStartCamera, !isEditing else { return }
             didAutoStartCamera = true
-            if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                showingCamera = true
-            } else {
-                errorMessage = "当前设备没有可用相机。"
-            }
+            openCamera()
         }
         .sheet(isPresented: $showingCamera) {
             CameraPicker { image in
@@ -121,10 +126,10 @@ struct DrinkFormView: View {
             guard !isEditing, let item else { return }
             Task {
                 do {
-                    guard let data = try await item.loadTransferable(type: Data.self),
-                          let image = UIImage(data: data) else {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
                         throw ProcessingError.invalidImage
                     }
+                    let image = try data.downsampledImage(maxDimension: 1_800)
                     await process(image)
                 } catch {
                     errorMessage = error.localizedDescription
@@ -207,11 +212,7 @@ struct DrinkFormView: View {
                 }
 
                 Button {
-                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                        showingCamera = true
-                    } else {
-                        errorMessage = "当前设备没有可用相机。"
-                    }
+                    openCamera()
                 } label: {
                     Label(isEditing ? "重新拍照" : "拍照", systemImage: "camera")
                         .frame(maxWidth: .infinity)
@@ -277,13 +278,14 @@ struct DrinkFormView: View {
 
     @MainActor
     private func process(_ image: UIImage) async {
-        originalImage = image
+        let displayImage = image.preparedForDrinkForm()
+        originalImage = displayImage
         stickerImage = nil
         isProcessing = true
         defer { isProcessing = false }
 
         do {
-            let processed = try await DrinkImageProcessor.process(image)
+            let processed = try await DrinkImageProcessor.process(displayImage)
             didChangeImage = true
             stickerImage = processed.sticker
         } catch {
@@ -333,7 +335,6 @@ struct DrinkFormView: View {
             }
             try modelContext.save()
             BrandStore.remember(cleanedBrand)
-            reset()
             onSaved()
             dismiss()
         } catch {
@@ -341,20 +342,38 @@ struct DrinkFormView: View {
         }
     }
 
-    private func reset() {
-        brand = ""
-        name = ""
-        sweetness = "正常糖"
-        iceLevel = "正常冰"
-        rating = 4.0
-        consumedAt = .now
-        location = ""
-        note = ""
-        isLimited = false
-        originalImage = nil
-        stickerImage = nil
-        photoItem = nil
-        didChangeImage = false
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+
+    private func openCamera() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            errorMessage = "当前设备没有可用相机。"
+            return
+        }
+
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            showingCamera = true
+
+        case .notDetermined:
+            Task {
+                let granted = await AVCaptureDevice.requestAccess(for: .video)
+                await MainActor.run {
+                    if granted {
+                        showingCamera = true
+                    } else {
+                        errorMessage = "没有相机权限，请在系统设置中允许访问相机。"
+                    }
+                }
+            }
+
+        case .denied, .restricted:
+            errorMessage = "没有相机权限，请在系统设置中允许访问相机。"
+
+        @unknown default:
+            errorMessage = "无法确认相机权限，请稍后再试。"
+        }
     }
 }
 
@@ -377,6 +396,41 @@ private struct StickerPreviewView: View {
                 }
         }
         .preferredColorScheme(.light)
+    }
+}
+
+private extension UIImage {
+    func preparedForDrinkForm() -> UIImage {
+        let longestSide = max(size.width, size.height)
+        let ratio = min(1, 1_800 / longestSide)
+        let targetSize = CGSize(width: size.width * ratio, height: size.height * ratio)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
+}
+
+private extension Data {
+    func downsampledImage(maxDimension: CGFloat) throws -> UIImage {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(self as CFData, options) else {
+            throw ProcessingError.invalidImage
+        }
+
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxDimension)
+        ] as CFDictionary
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
+            throw ProcessingError.invalidImage
+        }
+        return UIImage(cgImage: cgImage)
     }
 }
 

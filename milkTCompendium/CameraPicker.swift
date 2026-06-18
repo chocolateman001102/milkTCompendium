@@ -4,6 +4,12 @@ import UIKit
 struct CameraPicker: UIViewControllerRepresentable {
     @Environment(\.dismiss) private var dismiss
     let onImage: (UIImage) -> Void
+    let onCancel: () -> Void
+
+    init(onImage: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void = {}) {
+        self.onImage = onImage
+        self.onCancel = onCancel
+    }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -31,23 +37,16 @@ struct CameraPicker: UIViewControllerRepresentable {
             didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
         ) {
             if let image = info[.originalImage] as? UIImage {
-                parent.onImage(image.normalized)
+                parent.onImage(image)
+            } else {
+                parent.onCancel()
             }
             parent.dismiss()
         }
 
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.onCancel()
             parent.dismiss()
-        }
-    }
-}
-
-private extension UIImage {
-    var normalized: UIImage {
-        guard imageOrientation != .up else { return self }
-        let renderer = UIGraphicsImageRenderer(size: size)
-        return renderer.image { _ in
-            draw(in: CGRect(origin: .zero, size: size))
         }
     }
 }

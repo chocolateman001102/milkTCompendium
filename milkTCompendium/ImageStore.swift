@@ -42,6 +42,11 @@ enum ImageStore {
         return image
     }
 
+    static func data(_ name: String?) -> Data? {
+        guard let name else { return nil }
+        return try? Data(contentsOf: directory.appendingPathComponent(name))
+    }
+
     static func delete(_ name: String?) {
         guard let name else { return }
         imageCache.removeObject(forKey: name as NSString)

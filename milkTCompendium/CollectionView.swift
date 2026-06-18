@@ -5,10 +5,13 @@ import UIKit
 struct CollectionView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Drink.createdAt, order: .reverse) private var drinks: [Drink]
-    @State private var draggingDrink: Drink?
+    @ObservedObject var sharedStore: SharedCompendiumStore
+    @State private var selectedCompendiumID = "mine"
+    @State private var showingTransfer = false
+    @State private var draggingItem: LadderDrinkDisplayItem?
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
-    @State private var selectedDrink: Drink?
+    @State private var selectedItem: LadderDrinkDisplayItem?
     @State private var editingDrink: Drink?
     @State private var ladderScale: CGFloat = 0.52
     let onStartCapture: () -> Void
@@ -18,8 +21,25 @@ struct CollectionView: View {
         min(2.4, max(0.52, ladderScale))
     }
 
-    private var sortedDrinks: [Drink] {
-        drinks.sorted {
+    private var isShowingMine: Bool {
+        selectedCompendiumID == "mine"
+    }
+
+    private var activeSharedCompendium: SharedCompendium? {
+        sharedStore.compendiums.first { $0.id == selectedCompendiumID }
+    }
+
+    private var displayItems: [LadderDrinkDisplayItem] {
+        if let activeSharedCompendium, !isShowingMine {
+            return activeSharedCompendium.drinks.map {
+                LadderDrinkDisplayItem(sharedDrink: $0, ownerID: activeSharedCompendium.ownerID)
+            }
+        }
+        return drinks.map(LadderDrinkDisplayItem.init(drink:))
+    }
+
+    private var sortedItems: [LadderDrinkDisplayItem] {
+        displayItems.sorted {
             if $0.rating == $1.rating {
                 return $0.createdAt > $1.createdAt
             }
@@ -28,15 +48,20 @@ struct CollectionView: View {
     }
 
     var body: some View {
-        Group {
-            if drinks.isEmpty {
-                Text("拉动右下角的小标记录")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ratingLadder
+        ZStack(alignment: .top) {
+            Group {
+                if displayItems.isEmpty {
+                    Text(isShowingMine ? "拉动右下角的小标记录" : "这本图鉴暂时没有记录")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ratingLadder
+                }
             }
+
+            topControls
+                .padding(.top, 12)
         }
         .background(Color(.systemGroupedBackground))
         .toolbar(.hidden, for: .navigationBar)
@@ -49,7 +74,7 @@ struct CollectionView: View {
             .padding(.bottom, 48)
         }
         .overlay(alignment: .bottom) {
-            if draggingDrink != nil {
+            if draggingItem != nil {
                 DeleteDropZone(isActive: isOverDeleteTarget)
                     .padding(.bottom, 22)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -57,17 +82,17 @@ struct CollectionView: View {
             }
         }
         .overlay {
-            if let selectedDrink {
+            if let selectedItem {
                 FloatingDrinkCardOverlay(
-                    drink: selectedDrink,
+                    item: selectedItem,
                     onClose: {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            self.selectedDrink = nil
+                            self.selectedItem = nil
                         }
                     },
                     onEdit: {
-                        editingDrink = selectedDrink
-                        self.selectedDrink = nil
+                        editingDrink = selectedItem.localDrink
+                        self.selectedItem = nil
                     }
                 )
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
@@ -77,6 +102,15 @@ struct CollectionView: View {
         .navigationDestination(isPresented: editingDrinkBinding) {
             if let editingDrink {
                 DrinkFormView(mode: .edit(editingDrink)) {}
+            }
+        }
+        .sheet(isPresented: $showingTransfer) {
+            NearbyTransferView(drinks: drinks, sharedStore: sharedStore) { compendium in
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                    selectedCompendiumID = compendium.id
+                    selectedItem = nil
+                    draggingItem = nil
+                }
             }
         }
     }
@@ -91,18 +125,20 @@ struct CollectionView: View {
                 zoomScale: $ladderScale,
                 contentSize: canvasSize,
                 entries: entries,
-                onTapDrink: { drink in
-                    guard draggingDrink == nil, dragTranslation == .zero else { return }
+                allowsDragging: isShowingMine,
+                onTapItem: { item in
+                    guard draggingItem == nil, dragTranslation == .zero else { return }
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                        selectedDrink = drink
+                        selectedItem = item
                     }
                 },
-                onDragChanged: { drink, translation, isOverDelete in
-                    if draggingDrink == nil {
+                onDragChanged: { item, translation, isOverDelete in
+                    guard item.localDrink != nil else { return }
+                    if draggingItem == nil {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
 
-                    draggingDrink = drink
+                    draggingItem = item
                     dragTranslation = translation
                     if isOverDelete != isOverDeleteTarget {
                         UIImpactFeedbackGenerator(style: isOverDelete ? .medium : .light).impactOccurred()
@@ -111,13 +147,13 @@ struct CollectionView: View {
                         isOverDeleteTarget = isOverDelete
                     }
                 },
-                onDragEnded: { drink, shouldDelete in
-                    if shouldDelete, let drink {
+                onDragEnded: { item, shouldDelete in
+                    if shouldDelete, let drink = item?.localDrink {
                         delete(drink)
                     }
 
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
-                        draggingDrink = nil
+                        draggingItem = nil
                         dragTranslation = .zero
                         isOverDeleteTarget = false
                     }
@@ -127,17 +163,17 @@ struct CollectionView: View {
                     LadderAxisView(metrics: metrics)
 
                     ForEach(entries) { entry in
-                        LadderDrinkNode(drink: entry.drink, labelVisibility: labelVisibility)
+                        LadderDrinkNode(item: entry.item, labelVisibility: labelVisibility)
                             .scaleEffect(nodeCounterScale)
-                            .scaleEffect(draggingDrink === entry.drink ? 1.12 : 1)
-                            .offset(draggingDrink === entry.drink ? dragTranslation : .zero)
+                            .scaleEffect(draggingItem?.id == entry.item.id ? 1.12 : 1)
+                            .offset(draggingItem?.id == entry.item.id ? dragTranslation : .zero)
                             .shadow(
-                                color: draggingDrink === entry.drink ? .black.opacity(0.18) : .clear,
-                                radius: draggingDrink === entry.drink ? 16 : 0,
-                                y: draggingDrink === entry.drink ? 9 : 0
+                                color: draggingItem?.id == entry.item.id ? .black.opacity(0.18) : .clear,
+                                radius: draggingItem?.id == entry.item.id ? 16 : 0,
+                                y: draggingItem?.id == entry.item.id ? 9 : 0
                             )
                             .position(entry.position)
-                            .zIndex(draggingDrink === entry.drink ? 10 : 1)
+                            .zIndex(draggingItem?.id == entry.item.id ? 10 : 1)
                             .allowsHitTesting(false)
                     }
                 }
@@ -147,6 +183,62 @@ struct CollectionView: View {
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("评分天梯图")
         }
+    }
+
+    private var topControls: some View {
+        HStack(spacing: 10) {
+            Menu {
+                Button {
+                    selectedCompendiumID = "mine"
+                    selectedItem = nil
+                } label: {
+                    Label("我的", systemImage: selectedCompendiumID == "mine" ? "checkmark" : "")
+                }
+
+                ForEach(sharedStore.compendiums) { compendium in
+                    Button {
+                        selectedCompendiumID = compendium.id
+                        selectedItem = nil
+                    } label: {
+                        Label(compendium.ownerName, systemImage: selectedCompendiumID == compendium.id ? "checkmark" : "")
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(currentCompendiumTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .foregroundStyle(.primary)
+                .background(.white.opacity(0.96))
+                .clipShape(Capsule())
+                .shadow(color: .black.opacity(0.08), radius: 12, y: 5)
+            }
+
+            Button {
+                showingTransfer = true
+            } label: {
+                Text("互传")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .foregroundStyle(.white)
+                    .background(.black)
+                    .clipShape(Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 12, y: 5)
+            }
+        }
+    }
+
+    private var currentCompendiumTitle: String {
+        if let activeSharedCompendium, !isShowingMine {
+            return activeSharedCompendium.ownerName
+        }
+        return "我的"
     }
 
     private var editingDrinkBinding: Binding<Bool> {
@@ -171,7 +263,7 @@ struct CollectionView: View {
     }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
-        let drinkCount = CGFloat(max(drinks.count, 1))
+        let drinkCount = CGFloat(max(displayItems.count, 1))
         let densityHeight = 920 + drinkCount * 13
         return CGSize(
             width: max(viewport.width * 2.65, 980),
@@ -183,12 +275,12 @@ struct CollectionView: View {
         var leftColumnBottoms: [CGFloat] = []
         var rightColumnBottoms: [CGFloat] = []
         let minimumVerticalSpacing: CGFloat = 76
-        let columnSpacing: CGFloat = 148
-        let nearestColumnDistance: CGFloat = 86
+        let columnSpacing: CGFloat = 118
+        let nearestColumnDistance: CGFloat = 69
 
-        return sortedDrinks.map { drink in
-            let y = yPosition(for: drink.rating, metrics: metrics)
-            let hash = stableHash(for: drink)
+        return sortedItems.map { item in
+            let y = yPosition(for: item.rating, metrics: metrics)
+            let hash = stableHash(for: item)
             let preferRight = hash.isMultiple(of: 2)
             let preferredSide: LadderSide = preferRight ? .right : .left
 
@@ -218,7 +310,7 @@ struct CollectionView: View {
             }
 
             return LadderDrinkEntry(
-                drink: drink,
+                item: item,
                 position: CGPoint(
                     x: min(max(34, placement.x), metrics.size.width - 34),
                     y: min(max(metrics.plotTop, placement.y), metrics.plotBottom)
@@ -335,8 +427,8 @@ struct CollectionView: View {
         return metrics.plotTop + (5 - clamped) / 5 * metrics.plotHeight
     }
 
-    private func stableHash(for drink: Drink) -> Int {
-        let key = "\(drink.brand)|\(drink.name)|\(drink.createdAt.timeIntervalSince1970)"
+    private func stableHash(for item: LadderDrinkDisplayItem) -> Int {
+        let key = "\(item.brand)|\(item.name)|\(item.createdAt.timeIntervalSince1970)"
         return key.unicodeScalars.reduce(0) { partial, scalar in
             abs((partial * 31 + Int(scalar.value)) % 10_000)
         }
@@ -355,15 +447,17 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     @Binding var zoomScale: CGFloat
     let contentSize: CGSize
     let entries: [LadderDrinkEntry]
-    let onTapDrink: (Drink) -> Void
-    let onDragChanged: (Drink, CGSize, Bool) -> Void
-    let onDragEnded: (Drink?, Bool) -> Void
+    let allowsDragging: Bool
+    let onTapItem: (LadderDrinkDisplayItem) -> Void
+    let onDragChanged: (LadderDrinkDisplayItem, CGSize, Bool) -> Void
+    let onDragEnded: (LadderDrinkDisplayItem?, Bool) -> Void
     @ViewBuilder var content: Content
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             zoomScale: $zoomScale,
-            onTapDrink: onTapDrink,
+            allowsDragging: allowsDragging,
+            onTapItem: onTapItem,
             onDragChanged: onDragChanged,
             onDragEnded: onDragEnded
         )
@@ -433,6 +527,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         context.coordinator.hostingController.rootView = AnyView(content)
         context.coordinator.zoomScale = $zoomScale
         context.coordinator.entries = entries
+        context.coordinator.allowsDragging = allowsDragging
         context.coordinator.contentSize = contentSize
         context.coordinator.widthConstraint?.constant = contentSize.width
         context.coordinator.heightConstraint?.constant = contentSize.height
@@ -450,9 +545,10 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var zoomScale: Binding<CGFloat>
         var entries: [LadderDrinkEntry] = []
-        let onTapDrink: (Drink) -> Void
-        let onDragChanged: (Drink, CGSize, Bool) -> Void
-        let onDragEnded: (Drink?, Bool) -> Void
+        var allowsDragging: Bool
+        let onTapItem: (LadderDrinkDisplayItem) -> Void
+        let onDragChanged: (LadderDrinkDisplayItem, CGSize, Bool) -> Void
+        let onDragEnded: (LadderDrinkDisplayItem?, Bool) -> Void
         let hostingController: UIHostingController<AnyView>
         weak var hostedView: UIView?
         weak var scrollView: UIScrollView?
@@ -462,19 +558,21 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         var didCenterInitialPosition = false
         var contentSize: CGSize = .zero
         var lastReportedZoomScale: CGFloat = 0
-        var longPressedDrink: Drink?
+        var longPressedItem: LadderDrinkDisplayItem?
         var longPressStartPoint: CGPoint = .zero
         var lastZoomInteractionAt = Date.distantPast
         private let zoomGestureCooldown: TimeInterval = 0.3
 
         init(
             zoomScale: Binding<CGFloat>,
-            onTapDrink: @escaping (Drink) -> Void,
-            onDragChanged: @escaping (Drink, CGSize, Bool) -> Void,
-            onDragEnded: @escaping (Drink?, Bool) -> Void
+            allowsDragging: Bool,
+            onTapItem: @escaping (LadderDrinkDisplayItem) -> Void,
+            onDragChanged: @escaping (LadderDrinkDisplayItem, CGSize, Bool) -> Void,
+            onDragEnded: @escaping (LadderDrinkDisplayItem?, Bool) -> Void
         ) {
             self.zoomScale = zoomScale
-            self.onTapDrink = onTapDrink
+            self.allowsDragging = allowsDragging
+            self.onTapItem = onTapItem
             self.onDragChanged = onDragChanged
             self.onDragEnded = onDragEnded
             hostingController = UIHostingController(rootView: AnyView(EmptyView()))
@@ -491,38 +589,38 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
                   let entry = entry(at: recognizer.location(in: scrollView)) else {
                 return
             }
-            onTapDrink(entry.drink)
+            onTapItem(entry.item)
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-            guard canStartDrinkGesture, let scrollView else { return }
+            guard allowsDragging, canStartDrinkGesture, let scrollView else { return }
             let point = recognizer.location(in: scrollView)
 
             switch recognizer.state {
             case .began:
-                guard let entry = entry(at: point) else { return }
-                longPressedDrink = entry.drink
+                guard let entry = entry(at: point), entry.item.localDrink != nil else { return }
+                longPressedItem = entry.item
                 longPressStartPoint = point
 
             case .changed:
-                guard let drink = longPressedDrink else { return }
+                guard let item = longPressedItem else { return }
                 let translation = CGSize(
                     width: point.x - longPressStartPoint.x,
                     height: point.y - longPressStartPoint.y
                 )
-                onDragChanged(drink, translation, translation.height > 150)
+                onDragChanged(item, translation, translation.height > 150)
 
             case .ended:
                 let translation = CGSize(
                     width: point.x - longPressStartPoint.x,
                     height: point.y - longPressStartPoint.y
                 )
-                onDragEnded(longPressedDrink, translation.height > 150)
-                longPressedDrink = nil
+                onDragEnded(longPressedItem, translation.height > 150)
+                longPressedItem = nil
 
             case .cancelled, .failed:
-                onDragEnded(longPressedDrink, false)
-                longPressedDrink = nil
+                onDragEnded(longPressedItem, false)
+                longPressedItem = nil
 
             default:
                 break
@@ -549,7 +647,11 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             if gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer {
                 guard canStartDrinkGesture, let scrollView else { return false }
-                return entry(at: touch.location(in: scrollView)) != nil
+                guard let entry = entry(at: touch.location(in: scrollView)) else { return false }
+                if gestureRecognizer is UILongPressGestureRecognizer {
+                    return allowsDragging && entry.item.localDrink != nil
+                }
+                return true
             }
             return true
         }
@@ -663,11 +765,11 @@ private struct LadderMetrics {
 }
 
 private struct LadderDrinkEntry: Identifiable {
-    let drink: Drink
+    let item: LadderDrinkDisplayItem
     let position: CGPoint
 
-    var id: ObjectIdentifier {
-        ObjectIdentifier(drink)
+    var id: String {
+        item.id
     }
 }
 
@@ -715,7 +817,7 @@ private struct LadderAxisView: View {
 }
 
 private struct LadderDrinkNode: View {
-    let drink: Drink
+    let item: LadderDrinkDisplayItem
     let labelVisibility: CGFloat
 
     var body: some View {
@@ -729,7 +831,7 @@ private struct LadderDrinkNode: View {
         }
         .frame(width: labelWidth, height: 58, alignment: .top)
         .contentShape(Rectangle())
-        .accessibilityLabel("\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", drink.rating))")
+        .accessibilityLabel("\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", item.rating))")
     }
 
     private var labelView: some View {
@@ -759,7 +861,7 @@ private struct LadderDrinkNode: View {
                 .fill(.white.opacity(0.94))
                 .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
 
-            if let image = ImageStore.load(drink.stickerImageName) {
+            if let image = item.stickerImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
@@ -776,7 +878,7 @@ private struct LadderDrinkNode: View {
                 .stroke(.black.opacity(0.12), lineWidth: 1)
         )
         .overlay(alignment: .bottomTrailing) {
-            Text(String(format: "%.2f", drink.rating))
+            Text(String(format: "%.2f", item.rating))
                 .font(.system(size: 7, weight: .bold, design: .rounded).monospacedDigit())
                 .foregroundStyle(.white)
                 .padding(.horizontal, 3)
@@ -788,12 +890,12 @@ private struct LadderDrinkNode: View {
     }
 
     private var displayName: String {
-        let cleaned = drink.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "未命名" : cleaned
     }
 
     private var displayBrand: String {
-        let cleaned = drink.brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = item.brand.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "未知品牌" : cleaned
     }
 

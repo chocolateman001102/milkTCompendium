@@ -8,7 +8,8 @@ struct ProcessedDrinkImage {
 
 enum DrinkImageProcessor {
     static func process(_ image: UIImage) async throws -> ProcessedDrinkImage {
-        let normalizedImage = image.normalizedForProcessing()
+        let normalizedImage = image
+            .resizedAndNormalizedToFit(maxDimension: 1_400)
         guard let cgImage = normalizedImage.cgImage else {
             throw ProcessingError.invalidImage
         }
@@ -19,43 +20,50 @@ enum DrinkImageProcessor {
 
     private static func createSticker(from cgImage: CGImage) async throws -> UIImage {
         try await Task.detached(priority: .userInitiated) {
-            let request = VNGenerateForegroundInstanceMaskRequest()
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            try handler.perform([request])
+            try autoreleasepool {
+                let request = VNGenerateForegroundInstanceMaskRequest()
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                try handler.perform([request])
 
-            guard let observation = request.results?.first,
-                  !observation.allInstances.isEmpty else {
-                throw ProcessingError.noForeground
-            }
+                guard let observation = request.results?.first,
+                      !observation.allInstances.isEmpty else {
+                    throw ProcessingError.noForeground
+                }
 
-            let buffer = try observation.generateMaskedImage(
-                ofInstances: observation.allInstances,
-                from: handler,
-                croppedToInstancesExtent: true
-            )
-            let ciImage = CIImage(cvPixelBuffer: buffer)
-            let context = CIContext()
-            guard let result = context.createCGImage(ciImage, from: ciImage.extent) else {
-                throw ProcessingError.renderFailed
+                let buffer = try observation.generateMaskedImage(
+                    ofInstances: observation.allInstances,
+                    from: handler,
+                    croppedToInstancesExtent: true
+                )
+                let ciImage = CIImage(cvPixelBuffer: buffer)
+                let context = CIContext()
+                guard let result = context.createCGImage(ciImage, from: ciImage.extent) else {
+                    throw ProcessingError.renderFailed
+                }
+                let cutout = UIImage(cgImage: result)
+                return cutout
+                    .bestUprightDrinkOrientation()
+                    .resizedAndNormalizedToFit(maxDimension: 900)
+                    .addingStickerOutline()
             }
-            let cutout = UIImage(cgImage: result)
-            return cutout
-                .bestUprightDrinkOrientation()
-                .addingStickerOutline()
         }.value
     }
 
 }
 
 private extension UIImage {
-    func normalizedForProcessing() -> UIImage {
-        guard imageOrientation != .up else { return self }
+    func resizedAndNormalizedToFit(maxDimension: CGFloat) -> UIImage {
+        let longestSide = max(size.width, size.height)
+        guard longestSide > maxDimension || imageOrientation != .up else { return self }
 
+        let ratio = min(1, maxDimension / longestSide)
+        let targetSize = CGSize(width: size.width * ratio, height: size.height * ratio)
         let format = UIGraphicsImageRendererFormat()
-        format.scale = scale
+        format.scale = 1
         format.opaque = false
-        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            draw(in: CGRect(origin: .zero, size: size))
+
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: targetSize))
         }
     }
 
@@ -86,7 +94,7 @@ private extension UIImage {
         let origin = CGPoint(x: canvasInset, y: canvasInset)
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = scale
+        format.scale = 1
         format.opaque = false
 
         return UIGraphicsImageRenderer(size: canvasSize, format: format).image { _ in
@@ -102,7 +110,7 @@ private extension UIImage {
 
     private func tintedSilhouette(color: UIColor) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
-        format.scale = scale
+        format.scale = 1
         format.opaque = false
 
         return UIGraphicsImageRenderer(size: size, format: format).image { _ in
@@ -137,7 +145,7 @@ private extension UIImage {
         let radians = CGFloat(normalizedTurns) * .pi / 2
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = scale
+        format.scale = 1
         format.opaque = false
 
         return UIGraphicsImageRenderer(size: canvasSize, format: format).image { context in

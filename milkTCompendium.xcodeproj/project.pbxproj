@@ -19,6 +19,10 @@
 		A1000000000000000000000C /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* LaunchScreen.storyboard */; };
 		A1000000000000000000000D /* BrandStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* BrandStore.swift */; };
 		A1000000000000000000000E /* DrinkDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* DrinkDetailView.swift */; };
+		A1000000000000000000000F /* LadderDrinkDisplayItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000F /* LadderDrinkDisplayItem.swift */; };
+		A10000000000000000000010 /* SharedCompendiumStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* SharedCompendiumStore.swift */; };
+		A10000000000000000000011 /* NearbyTransferManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* NearbyTransferManager.swift */; };
+		A10000000000000000000012 /* NearbyTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* NearbyTransferView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +40,11 @@
 		A2000000000000000000000C /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		A2000000000000000000000D /* BrandStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000E /* DrinkDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DrinkDetailView.swift; sourceTree = "<group>"; };
+		A2000000000000000000000F /* LadderDrinkDisplayItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LadderDrinkDisplayItem.swift; sourceTree = "<group>"; };
+		A20000000000000000000010 /* SharedCompendiumStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedCompendiumStore.swift; sourceTree = "<group>"; };
+		A20000000000000000000011 /* NearbyTransferManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyTransferManager.swift; sourceTree = "<group>"; };
+		A20000000000000000000012 /* NearbyTransferView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyTransferView.swift; sourceTree = "<group>"; };
+		A20000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -69,7 +78,12 @@
 				A20000000000000000000008 /* CollectionView.swift */,
 				A20000000000000000000009 /* DrinkCardView.swift */,
 				A2000000000000000000000E /* DrinkDetailView.swift */,
+				A2000000000000000000000F /* LadderDrinkDisplayItem.swift */,
+				A20000000000000000000010 /* SharedCompendiumStore.swift */,
+				A20000000000000000000011 /* NearbyTransferManager.swift */,
+				A20000000000000000000012 /* NearbyTransferView.swift */,
 				A2000000000000000000000A /* CameraPicker.swift */,
+				A20000000000000000000013 /* Info.plist */,
 				A2000000000000000000000B /* Assets.xcassets */,
 				A2000000000000000000000C /* LaunchScreen.storyboard */,
 				A2000000000000000000000D /* BrandStore.swift */,
@@ -164,6 +178,10 @@
 				A10000000000000000000008 /* CollectionView.swift in Sources */,
 				A10000000000000000000009 /* DrinkCardView.swift in Sources */,
 				A1000000000000000000000E /* DrinkDetailView.swift in Sources */,
+				A1000000000000000000000F /* LadderDrinkDisplayItem.swift in Sources */,
+				A10000000000000000000010 /* SharedCompendiumStore.swift in Sources */,
+				A10000000000000000000011 /* NearbyTransferManager.swift in Sources */,
+				A10000000000000000000012 /* NearbyTransferView.swift in Sources */,
 				A1000000000000000000000A /* CameraPicker.swift in Sources */,
 				A1000000000000000000000D /* BrandStore.swift in Sources */,
 			);
@@ -211,12 +229,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = D5G57ZMV9C;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "拍摄奶茶照片并生成饮品贴图";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "选择奶茶照片并识别饮品信息";
-				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIRequiresFullScreen = YES;
-				INFOPLIST_KEY_UIUserInterfaceStyle = Light;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = milkTCompendium/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -240,12 +254,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = D5G57ZMV9C;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "拍摄奶茶照片并生成饮品贴图";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "选择奶茶照片并识别饮品信息";
-				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
-				INFOPLIST_KEY_UIRequiresFullScreen = YES;
-				INFOPLIST_KEY_UIUserInterfaceStyle = Light;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = milkTCompendium/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

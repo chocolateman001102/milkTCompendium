@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct FloatingDrinkCardOverlay: View {
-    let drink: Drink
+    let item: LadderDrinkDisplayItem
     let onClose: () -> Void
     let onEdit: () -> Void
 
@@ -30,17 +30,19 @@ struct FloatingDrinkCardOverlay: View {
             card(width: width, height: height)
                 .frame(width: width, height: height)
 
-            Button("修改") {
-                onEdit()
+            if item.isEditable {
+                Button("修改") {
+                    onEdit()
+                }
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, 18)
+                .padding(.vertical, 10)
+                .foregroundStyle(.white)
+                .background(.black)
+                .clipShape(Capsule())
+                .shadow(color: .black.opacity(0.16), radius: 14, y: 7)
+                .padding(.trailing, 6)
             }
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
-            .foregroundStyle(.white)
-            .background(.black)
-            .clipShape(Capsule())
-            .shadow(color: .black.opacity(0.16), radius: 14, y: 7)
-            .padding(.trailing, 6)
         }
     }
 
@@ -68,14 +70,14 @@ struct FloatingDrinkCardOverlay: View {
                 }
 
                 HStack(spacing: 8) {
-                    infoPill(title: "甜度", value: drink.sweetness)
-                    infoPill(title: "冰度", value: drink.iceLevel)
+                    infoPill(title: "甜度", value: item.sweetness)
+                    infoPill(title: "冰度", value: item.iceLevel)
                 }
 
                 noteView
 
                 HStack {
-                    Text(String(format: "%.2f", drink.rating))
+                    Text(String(format: "%.2f", item.rating))
                         .font(.system(size: 26, weight: .bold, design: .rounded).monospacedDigit())
                     Text("/ 5")
                         .font(.caption.weight(.semibold))
@@ -99,7 +101,7 @@ struct FloatingDrinkCardOverlay: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(Color(.secondarySystemGroupedBackground))
 
-            if let image = ImageStore.load(drink.stickerImageName) {
+            if let image = item.stickerImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
@@ -114,12 +116,12 @@ struct FloatingDrinkCardOverlay: View {
     }
 
     private var limitedBadge: some View {
-        Text(drink.isLimited ? "限定" : "常规")
+        Text(item.isLimited ? "限定" : "常规")
             .font(.caption2.weight(.black))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .foregroundStyle(drink.isLimited ? .white : .secondary)
-            .background(drink.isLimited ? Color.black : Color(.secondarySystemGroupedBackground))
+            .foregroundStyle(item.isLimited ? .white : .secondary)
+            .background(item.isLimited ? Color.black : Color(.secondarySystemGroupedBackground))
             .clipShape(Capsule())
     }
 
@@ -146,7 +148,7 @@ struct FloatingDrinkCardOverlay: View {
                 .foregroundStyle(.secondary)
             Text(displayNote)
                 .font(.caption)
-                .foregroundStyle(drink.note.isEmpty ? .tertiary : .primary)
+                .foregroundStyle(item.note.isEmpty ? .tertiary : .primary)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, minHeight: 30, alignment: .topLeading)
         }
@@ -154,17 +156,17 @@ struct FloatingDrinkCardOverlay: View {
     }
 
     private var displayBrand: String {
-        let cleaned = drink.brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = item.brand.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "未知品牌" : cleaned
     }
 
     private var displayName: String {
-        let cleaned = drink.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "未命名" : cleaned
     }
 
     private var displayNote: String {
-        let cleaned = drink.note.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = item.note.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "无" : cleaned
     }
 }
