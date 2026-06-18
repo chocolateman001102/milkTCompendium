@@ -62,6 +62,7 @@ struct CollectionView: View {
 
             topControls
                 .padding(.top, 12)
+                .padding(.horizontal, 18)
         }
         .background(Color(.systemGroupedBackground))
         .toolbar(.hidden, for: .navigationBar)
@@ -107,9 +108,7 @@ struct CollectionView: View {
         .sheet(isPresented: $showingTransfer) {
             NearbyTransferView(drinks: drinks, sharedStore: sharedStore) { compendium in
                 withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    selectedCompendiumID = compendium.id
-                    selectedItem = nil
-                    draggingItem = nil
+                    switchCompendium(to: compendium.id)
                 }
             }
         }
@@ -125,6 +124,7 @@ struct CollectionView: View {
                 zoomScale: $ladderScale,
                 contentSize: canvasSize,
                 entries: entries,
+                contentSignature: ladderContentSignature(entries: entries),
                 allowsDragging: isShowingMine,
                 onTapItem: { item in
                     guard draggingItem == nil, dragTranslation == .zero else { return }
@@ -189,16 +189,14 @@ struct CollectionView: View {
         HStack(spacing: 10) {
             Menu {
                 Button {
-                    selectedCompendiumID = "mine"
-                    selectedItem = nil
+                    switchCompendium(to: "mine")
                 } label: {
                     Label("我的", systemImage: selectedCompendiumID == "mine" ? "checkmark" : "")
                 }
 
                 ForEach(sharedStore.compendiums) { compendium in
                     Button {
-                        selectedCompendiumID = compendium.id
-                        selectedItem = nil
+                        switchCompendium(to: compendium.id)
                     } label: {
                         Label(compendium.ownerName, systemImage: selectedCompendiumID == compendium.id ? "checkmark" : "")
                     }
@@ -208,6 +206,8 @@ struct CollectionView: View {
                     Text(currentCompendiumTitle)
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 180, alignment: .leading)
                     Image(systemName: "chevron.down")
                         .font(.caption2.weight(.bold))
                 }
@@ -232,6 +232,7 @@ struct CollectionView: View {
                     .shadow(color: .black.opacity(0.12), radius: 12, y: 5)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var currentCompendiumTitle: String {
@@ -239,6 +240,16 @@ struct CollectionView: View {
             return activeSharedCompendium.ownerName
         }
         return "我的"
+    }
+
+    private func switchCompendium(to id: String) {
+        guard selectedCompendiumID != id else { return }
+        selectedCompendiumID = id
+        selectedItem = nil
+        draggingItem = nil
+        dragTranslation = .zero
+        isOverDeleteTarget = false
+        ladderScale = 0.52
     }
 
     private var editingDrinkBinding: Binding<Bool> {
@@ -257,6 +268,12 @@ struct CollectionView: View {
 
     private var showsLabels: Bool {
         effectiveLadderScale >= 1.18
+    }
+
+    private func ladderContentSignature(entries: [LadderDrinkEntry]) -> String {
+        let compendiumKey = selectedCompendiumID
+        let entryKey = entries.map(\.id).joined(separator: "|")
+        return "\(compendiumKey):\(entryKey)"
     }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
@@ -444,6 +461,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     @Binding var zoomScale: CGFloat
     let contentSize: CGSize
     let entries: [LadderDrinkEntry]
+    let contentSignature: String
     let allowsDragging: Bool
     let onTapItem: (LadderDrinkDisplayItem) -> Void
     let onDragChanged: (LadderDrinkDisplayItem, CGSize, Bool) -> Void
@@ -521,6 +539,12 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
     }
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        let contentDidChange = context.coordinator.contentSignature != contentSignature
+        if contentDidChange {
+            context.coordinator.contentSignature = contentSignature
+            context.coordinator.didCenterInitialPosition = false
+        }
+
         context.coordinator.hostingController.rootView = AnyView(content)
         context.coordinator.zoomScale = $zoomScale
         context.coordinator.entries = entries
@@ -534,9 +558,8 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             scrollView.setZoomScale(zoomScale, animated: false)
         }
 
-        DispatchQueue.main.async {
-            context.coordinator.centerInitialPositionIfNeeded()
-        }
+        scrollView.layoutIfNeeded()
+        context.coordinator.centerInitialPositionIfNeeded()
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
@@ -554,6 +577,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         var isZooming = false
         var didCenterInitialPosition = false
         var contentSize: CGSize = .zero
+        var contentSignature = ""
         var lastReportedZoomScale: CGFloat = 0
         var longPressedItem: LadderDrinkDisplayItem?
         var longPressStartPoint: CGPoint = .zero
@@ -822,10 +846,10 @@ private struct LadderDrinkNode: View {
         VStack(spacing: 3) {
             stickerBadge
 
-            if showsLabel {
-                labelView
-                    .transition(.opacity)
-            }
+            labelView
+                .opacity(showsLabel ? 1 : 0.001)
+                .offset(y: showsLabel ? 0 : -3)
+                .allowsHitTesting(showsLabel)
         }
         .frame(width: labelWidth, height: 58, alignment: .top)
         .contentShape(Rectangle())
