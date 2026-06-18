@@ -1,4 +1,5 @@
 import CoreImage
+import ImageIO
 import UIKit
 import Vision
 
@@ -245,5 +246,26 @@ enum ProcessingError: LocalizedError {
         case .renderFailed:
             "贴图生成失败，请重试。"
         }
+    }
+}
+
+extension Data {
+    func downsampledImage(maxDimension: CGFloat) throws -> UIImage {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(self as CFData, options) else {
+            throw ProcessingError.invalidImage
+        }
+
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxDimension)
+        ] as CFDictionary
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
+            throw ProcessingError.invalidImage
+        }
+        return UIImage(cgImage: cgImage)
     }
 }

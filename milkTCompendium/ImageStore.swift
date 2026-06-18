@@ -2,6 +2,7 @@ import UIKit
 
 enum ImageStore {
     private static let imageCache = NSCache<NSString, UIImage>()
+    private static let thumbnailCache = NSCache<NSString, UIImage>()
 
     private static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -42,6 +43,32 @@ enum ImageStore {
         return image
     }
 
+    static func thumbnail(_ name: String?, maxPixel: CGFloat = 120) -> UIImage? {
+        guard let name else { return nil }
+        let key = "\(name)-\(Int(maxPixel))" as NSString
+        if let cached = thumbnailCache.object(forKey: key) {
+            return cached
+        }
+
+        guard let image = load(name) else { return nil }
+        let thumbnail = image.resizedThumbnail(maxPixel: maxPixel)
+        thumbnailCache.setObject(thumbnail, forKey: key)
+        return thumbnail
+    }
+
+    static func thumbnail(at url: URL?, maxPixel: CGFloat = 120) -> UIImage? {
+        guard let url else { return nil }
+        let key = "file:\(url.path)-\(Int(maxPixel))" as NSString
+        if let cached = thumbnailCache.object(forKey: key) {
+            return cached
+        }
+
+        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
+        let thumbnail = image.resizedThumbnail(maxPixel: maxPixel)
+        thumbnailCache.setObject(thumbnail, forKey: key)
+        return thumbnail
+    }
+
     static func data(_ name: String?) -> Data? {
         guard let name else { return nil }
         return try? Data(contentsOf: directory.appendingPathComponent(name))
@@ -50,7 +77,23 @@ enum ImageStore {
     static func delete(_ name: String?) {
         guard let name else { return }
         imageCache.removeObject(forKey: name as NSString)
+        thumbnailCache.removeObject(forKey: "\(name)-120" as NSString)
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+    }
+}
+
+private extension UIImage {
+    func resizedThumbnail(maxPixel: CGFloat) -> UIImage {
+        let longestSide = max(size.width, size.height)
+        guard longestSide > maxPixel else { return self }
+        let ratio = maxPixel / longestSide
+        let targetSize = CGSize(width: size.width * ratio, height: size.height * ratio)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: targetSize))
+        }
     }
 }
 

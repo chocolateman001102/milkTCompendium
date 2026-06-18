@@ -163,7 +163,7 @@ struct CollectionView: View {
                     LadderAxisView(metrics: metrics)
 
                     ForEach(entries) { entry in
-                        LadderDrinkNode(item: entry.item, labelVisibility: labelVisibility)
+                        LadderDrinkNode(item: entry.item, showsLabel: showsLabels)
                             .scaleEffect(nodeCounterScale)
                             .scaleEffect(draggingItem?.id == entry.item.id ? 1.12 : 1)
                             .offset(draggingItem?.id == entry.item.id ? dragTranslation : .zero)
@@ -255,11 +255,8 @@ struct CollectionView: View {
         1 / pow(max(effectiveLadderScale, 0.01), 0.52)
     }
 
-    private var labelVisibility: CGFloat {
-        let lowerBound: CGFloat = 1.18
-        let upperBound: CGFloat = 1.42
-        let progress = (effectiveLadderScale - lowerBound) / (upperBound - lowerBound)
-        return min(1, max(0, progress))
+    private var showsLabels: Bool {
+        effectiveLadderScale >= 1.18
     }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
@@ -686,20 +683,17 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
             isZooming = true
             lastZoomInteractionAt = Date()
-            hostedView?.layer.rasterizationScale = UIScreen.main.scale
-            hostedView?.layer.shouldRasterize = true
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             lastZoomInteractionAt = Date()
-            if abs(scrollView.zoomScale - lastReportedZoomScale) > 0.045 {
+            if abs(scrollView.zoomScale - lastReportedZoomScale) > 0.12 || crossedLabelThreshold(scrollView.zoomScale, lastReportedZoomScale) {
                 zoomScale.wrappedValue = scrollView.zoomScale
                 lastReportedZoomScale = scrollView.zoomScale
             }
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-            hostedView?.layer.shouldRasterize = false
             isZooming = false
             lastZoomInteractionAt = Date()
             zoomScale.wrappedValue = scale
@@ -715,6 +709,10 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
         private func isDrinkGesture(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer
+        }
+
+        private func crossedLabelThreshold(_ current: CGFloat, _ previous: CGFloat) -> Bool {
+            (current >= 1.18 && previous < 1.18) || (current < 1.18 && previous >= 1.18)
         }
 
         func centerInitialPositionIfNeeded() {
@@ -818,16 +816,16 @@ private struct LadderAxisView: View {
 
 private struct LadderDrinkNode: View {
     let item: LadderDrinkDisplayItem
-    let labelVisibility: CGFloat
+    let showsLabel: Bool
 
     var body: some View {
         VStack(spacing: 3) {
             stickerBadge
 
-            labelView
-                .opacity(Double(labelOpacity))
-                .offset(y: (1 - labelVisibility) * -3)
-                .allowsHitTesting(labelVisibility > 0.92)
+            if showsLabel {
+                labelView
+                    .transition(.opacity)
+            }
         }
         .frame(width: labelWidth, height: 58, alignment: .top)
         .contentShape(Rectangle())
@@ -850,7 +848,7 @@ private struct LadderDrinkNode: View {
         .padding(.vertical, 3)
         .background(.white.opacity(0.9))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .shadow(color: .black.opacity(Double(labelOpacity) * 0.06), radius: 6, y: 2)
+        .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
         .frame(width: labelWidth)
     }
 
@@ -861,7 +859,7 @@ private struct LadderDrinkNode: View {
                 .fill(.white.opacity(0.94))
                 .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
 
-            if let image = item.stickerImage {
+            if let image = item.stickerThumbnailImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
@@ -904,10 +902,6 @@ private struct LadderDrinkNode: View {
         return min(156, max(76, CGFloat(longest) * 10 + 24))
     }
 
-    private var labelOpacity: CGFloat {
-        let eased = labelVisibility * labelVisibility * (3 - 2 * labelVisibility)
-        return eased
-    }
 }
 
 private struct DeleteDropZone: View {

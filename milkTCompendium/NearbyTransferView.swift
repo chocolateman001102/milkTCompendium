@@ -1,4 +1,3 @@
-import MultipeerConnectivity
 import SwiftUI
 
 struct NearbyTransferView: View {
@@ -28,6 +27,14 @@ struct NearbyTransferView: View {
 }
 
 private struct NearbyTransferSessionView: View {
+    enum PeerFilter: String, CaseIterable, Identifiable {
+        case all = "全部"
+        case notImported = "未导入"
+        case imported = "已导入"
+
+        var id: String { rawValue }
+    }
+
     let drinks: [Drink]
     let sharedStore: SharedCompendiumStore
     let displayName: String
@@ -35,11 +42,12 @@ private struct NearbyTransferSessionView: View {
     let onSaveDisplayName: (String) -> Void
     let onImported: (SharedCompendium) -> Void
 
-    @StateObject private var manager = NearbyTransferManager()
+    @StateObject private var manager: NearbyTransferManager
     @State private var message: String?
-    @State private var sendTask: Task<Void, Never>?
-    @State private var showingSystemBrowser = false
     @State private var sharePackage: SharePackage?
+    @State private var selectedPeer: NearbyPeer?
+    @State private var searchText = ""
+    @State private var filter: PeerFilter = .all
 
     init(
         drinks: [Drink],
@@ -55,82 +63,43 @@ private struct NearbyTransferSessionView: View {
         _draftDisplayName = draftDisplayName
         self.onSaveDisplayName = onSaveDisplayName
         self.onImported = onImported
-        _manager = StateObject(wrappedValue: NearbyTransferManager(displayName: displayName))
+        _manager = StateObject(wrappedValue: NearbyTransferManager(summary: Self.summary(for: drinks, displayName: displayName)))
     }
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 18) {
-                identityCard
-
-                statusCard
-
-                Button {
-                    shareWithSystemSheet()
-                } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("用 AirDrop/系统分享发送")
-                                .font(.body.weight(.semibold))
-                            Text("Multipeer 连接失败时使用这个离线兜底")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.headline)
-                    }
-                    .padding()
-                    .foregroundStyle(.primary)
-                    .background(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    myCard
+                    statusCard
+                    controls
+                    partyWall
                 }
-                .buttonStyle(.plain)
-                .disabled(manager.isSending)
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("附近设备")
-                        .font(.headline)
-
-                    if manager.peers.isEmpty {
-                        ContentUnavailableView("等待附近设备", systemImage: "dot.radiowaves.left.and.right", description: Text("让对方也打开互传页面"))
-                            .frame(maxWidth: .infinity, minHeight: 220)
-                    } else {
-                        ForEach(manager.peers) { peer in
-                            Button {
-                                send(to: peer)
-                            } label: {
-                                HStack {
-                                    Text(peer.name)
-                                        .font(.body.weight(.medium))
-                                    Spacer()
-                                    Text("连接并发送")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .padding()
-                                .background(.white)
-                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(manager.isSending)
-                        }
-                    }
-                }
-
-                Spacer()
+                .padding(18)
             }
-            .padding(18)
             .background(Color(.systemGroupedBackground))
             .navigationTitle("近场互传")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            shareWithSystemSheet()
+                        } label: {
+                            Label("AirDrop/系统分享", systemImage: "square.and.arrow.up")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                }
+            }
             .onAppear {
                 draftDisplayName = manager.localDisplayName
                 manager.onReceivedPackage = importPackage(at:)
+                manager.makePackageData = makePackageData
                 manager.start()
             }
             .onDisappear {
-                sendTask?.cancel()
                 manager.stop()
             }
             .alert("互传", isPresented: Binding(
@@ -141,11 +110,36 @@ private struct NearbyTransferSessionView: View {
             } message: {
                 Text(message ?? "")
             }
-            .sheet(isPresented: $showingSystemBrowser) {
-                NearbySystemBrowserView(manager: manager) {
-                    showingSystemBrowser = false
-                }
-                .ignoresSafeArea()
+            .alert(item: $manager.pendingInvitation) { invitation in
+                Alert(
+                    title: Text(invitation.mode.title),
+                    message: Text(invitation.mode == .receivingCompendium ? "\(invitation.peerName) 想发送图鉴给你" : "\(invitation.peerName) 想查看你的图鉴"),
+                    primaryButton: .default(Text("同意")) {
+                        manager.acceptInvitation()
+                    },
+                    secondaryButton: .cancel(Text("拒绝")) {
+                        manager.declineInvitation()
+                    }
+                )
+            }
+            .sheet(item: $selectedPeer) { peer in
+                PeerExchangePanel(
+                    peer: peer,
+                    isImported: isImported(peer),
+                    onSend: {
+                        manager.sendMine(to: peer)
+                        selectedPeer = nil
+                    },
+                    onRequest: {
+                        manager.requestCompendium(from: peer)
+                        selectedPeer = nil
+                    },
+                    onDisconnect: {
+                        manager.disconnect(from: peer)
+                        selectedPeer = nil
+                    }
+                )
+                .presentationDetents([.height(310)])
             }
             .sheet(item: $sharePackage) { package in
                 ActivityShareView(items: [package.url])
@@ -154,19 +148,34 @@ private struct NearbyTransferSessionView: View {
         }
     }
 
-    private var identityCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("本机 ID")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
+    private var myCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("我的图鉴")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    Text(displayName)
+                        .font(.title3.weight(.semibold))
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("\(drinks.count) 杯")
+                        .font(.headline)
+                    Text(String(format: "均分 %.2f", averageRating))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
             HStack(spacing: 10) {
                 TextField("本机 ID", text: $draftDisplayName)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .font(.title3.weight(.semibold))
                     .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, 9)
                     .background(Color(.secondarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
@@ -180,14 +189,10 @@ private struct NearbyTransferSessionView: View {
                 .background(.black)
                 .clipShape(Capsule())
             }
-
-            Text("附近设备会看到这个名字")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .padding()
         .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     private var statusCard: some View {
@@ -206,66 +211,95 @@ private struct NearbyTransferSessionView: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private func send(to peer: NearbyPeer) {
-        sendTask?.cancel()
-        message = nil
-        manager.prepareToSend(to: peer)
-        let ownerName = manager.localDisplayName
-        let snapshots = SharedCompendiumStore.exportSnapshots(from: drinks)
+    private var controls: some View {
+        VStack(spacing: 10) {
+            TextField("搜索附近的人", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(.white)
+                .clipShape(Capsule())
 
-        sendTask = Task {
-            do {
-                try await Task.sleep(for: .milliseconds(120))
-                try Task.checkCancellation()
-                let data = try await SharedCompendiumStore.exportArchiveData(
-                    from: snapshots,
-                    ownerName: ownerName
+            Picker("筛选", selection: $filter) {
+                ForEach(PeerFilter.allCases) { filter in
+                    Text(filter.rawValue).tag(filter)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var partyWall: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("附近的人")
+                .font(.headline)
+
+            if filteredPeers.isEmpty {
+                ContentUnavailableView(
+                    "等待附近的人",
+                    systemImage: "dot.radiowaves.left.and.right",
+                    description: Text("让对方也打开近场互传")
                 )
-                try Task.checkCancellation()
-                await MainActor.run {
-                    do {
-                        try manager.prepareSystemBrowserSend(data, targetName: peer.name)
-                        showingSystemBrowser = true
-                    } catch {
-                        manager.failPendingSend("发送失败：\(error.localizedDescription)")
-                        message = error.localizedDescription
+                .frame(maxWidth: .infinity, minHeight: 220)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                    ForEach(filteredPeers) { peer in
+                        Button {
+                            selectedPeer = peer
+                        } label: {
+                            PeerCard(peer: peer, isImported: isImported(peer))
+                        }
+                        .buttonStyle(.plain)
                     }
-                }
-            } catch is CancellationError {
-                await MainActor.run {
-                    manager.failPendingSend("发送已取消")
-                }
-            } catch {
-                await MainActor.run {
-                    manager.failPendingSend("发送失败：\(error.localizedDescription)")
-                    message = error.localizedDescription
                 }
             }
         }
     }
 
-    private func shareWithSystemSheet() {
-        sendTask?.cancel()
-        message = nil
-        manager.prepareToShare()
-        let ownerName = manager.localDisplayName
-        let snapshots = SharedCompendiumStore.exportSnapshots(from: drinks)
+    private var averageRating: Double {
+        guard !drinks.isEmpty else { return 0 }
+        return drinks.map(\.rating).reduce(0, +) / Double(drinks.count)
+    }
 
-        sendTask = Task {
+    private var filteredPeers: [NearbyPeer] {
+        manager.peers.filter { peer in
+            let imported = isImported(peer)
+            let matchesFilter = switch filter {
+            case .all:
+                true
+            case .notImported:
+                !imported
+            case .imported:
+                imported
+            }
+            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchesSearch = query.isEmpty || peer.name.localizedCaseInsensitiveContains(query)
+            return matchesFilter && matchesSearch
+        }
+    }
+
+    private func isImported(_ peer: NearbyPeer) -> Bool {
+        sharedStore.compendiums.contains { $0.ownerID == peer.stableID }
+    }
+
+    private func makePackageData() async throws -> Data {
+        let snapshots = SharedCompendiumStore.exportSnapshots(from: drinks)
+        return try await SharedCompendiumStore.exportArchiveData(
+            from: snapshots,
+            ownerName: manager.localDisplayName
+        )
+    }
+
+    private func shareWithSystemSheet() {
+        manager.prepareToShare()
+        Task {
             do {
-                let data = try await SharedCompendiumStore.exportArchiveData(
-                    from: snapshots,
-                    ownerName: ownerName
-                )
-                let url = try await writeSharePackage(data: data, ownerName: ownerName)
-                try Task.checkCancellation()
+                let data = try await makePackageData()
+                let url = try await writeSharePackage(data: data, ownerName: manager.localDisplayName)
                 await MainActor.run {
                     manager.finishPreparingShare()
                     sharePackage = SharePackage(url: url)
-                }
-            } catch is CancellationError {
-                await MainActor.run {
-                    manager.failPendingSend("发送已取消")
                 }
             } catch {
                 await MainActor.run {
@@ -299,6 +333,103 @@ private struct NearbyTransferSessionView: View {
             message = error.localizedDescription
         }
     }
+
+    private static func summary(for drinks: [Drink], displayName: String) -> NearbyLocalSummary {
+        let average = drinks.isEmpty ? 0 : drinks.map(\.rating).reduce(0, +) / Double(drinks.count)
+        return NearbyLocalSummary(
+            ownerID: SharedCompendiumStore.localOwnerID,
+            ownerName: displayName,
+            drinkCount: drinks.count,
+            averageRating: average,
+            exportedAt: .now
+        )
+    }
+}
+
+private struct PeerCard: View {
+    let peer: NearbyPeer
+    let isImported: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(peer.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Circle()
+                    .fill(isImported ? .green : .black)
+                    .frame(width: 8, height: 8)
+            }
+
+            HStack(spacing: 10) {
+                stat("\(peer.drinkCount)", "杯")
+                stat(String(format: "%.2f", peer.averageRating), "均分")
+            }
+
+            Text(isImported ? "已导入" : "可交换")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(isImported ? .green : .secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .shadow(color: .black.opacity(0.05), radius: 10, y: 4)
+    }
+
+    private func stat(_ value: String, _ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct PeerExchangePanel: View {
+    let peer: NearbyPeer
+    let isImported: Bool
+    let onSend: () -> Void
+    let onRequest: () -> Void
+    let onDisconnect: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Capsule()
+                .fill(.secondary.opacity(0.28))
+                .frame(width: 42, height: 5)
+                .frame(maxWidth: .infinity)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(peer.name)
+                    .font(.title2.weight(.semibold))
+                Text("\(peer.drinkCount) 杯 · 均分 \(String(format: "%.2f", peer.averageRating)) · \(isImported ? "已导入" : "未导入")")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button(action: onSend) {
+                Label("发送我的图鉴", systemImage: "arrow.up.circle.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button(action: onRequest) {
+                Label("请求对方图鉴", systemImage: "arrow.down.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.large)
+
+            Button("断开连接", role: .destructive, action: onDisconnect)
+                .frame(maxWidth: .infinity)
+        }
+        .padding(22)
+    }
 }
 
 private struct SharePackage: Identifiable {
@@ -314,47 +445,4 @@ private struct ActivityShareView: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}
-
-private struct NearbySystemBrowserView: UIViewControllerRepresentable {
-    let manager: NearbyTransferManager
-    let onDismiss: () -> Void
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
-
-    func makeUIViewController(context: Context) -> MCBrowserViewController {
-        manager.makeSystemBrowserViewController(delegate: context.coordinator)
-    }
-
-    func updateUIViewController(_ uiViewController: MCBrowserViewController, context: Context) {}
-
-    final class Coordinator: NSObject, MCBrowserViewControllerDelegate {
-        let parent: NearbySystemBrowserView
-
-        init(parent: NearbySystemBrowserView) {
-            self.parent = parent
-        }
-
-        func browserViewControllerDidFinish(_ browserViewController: MCBrowserViewController) {
-            parent.manager.sendToFirstConnectedPeerIfReady()
-            parent.manager.resumePeerBrowsing()
-            parent.onDismiss()
-        }
-
-        func browserViewControllerWasCancelled(_ browserViewController: MCBrowserViewController) {
-            parent.manager.cancelSystemBrowserSelectionIfNeeded()
-            parent.manager.resumePeerBrowsing()
-            parent.onDismiss()
-        }
-
-        func browserViewController(
-            _ browserViewController: MCBrowserViewController,
-            shouldPresentNearbyPeer peerID: MCPeerID,
-            withDiscoveryInfo info: [String: String]?
-        ) -> Bool {
-            parent.manager.shouldShowSystemPeer(peerID, discoveryInfo: info)
-        }
-    }
 }
