@@ -3,6 +3,7 @@ import SwiftUI
 struct NearbyTransferView: View {
     let drinks: [Drink]
     let sharedStore: SharedCompendiumStore
+    @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
     let onImported: (SharedCompendium) -> Void
 
     @AppStorage("NearbyTransferDisplayName") private var savedDisplayName = NearbyDisplayNameStore.displayName
@@ -12,6 +13,7 @@ struct NearbyTransferView: View {
         NearbyTransferSessionView(
             drinks: drinks,
             sharedStore: sharedStore,
+            tasteStatsStore: tasteStatsStore,
             displayName: NearbyDisplayNameStore.cleanDisplayName(savedDisplayName),
             draftDisplayName: $draftDisplayName,
             onSaveDisplayName: { name in
@@ -37,6 +39,7 @@ private struct NearbyTransferSessionView: View {
 
     let drinks: [Drink]
     let sharedStore: SharedCompendiumStore
+    @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
     let displayName: String
     @Binding var draftDisplayName: String
     let onSaveDisplayName: (String) -> Void
@@ -48,10 +51,12 @@ private struct NearbyTransferSessionView: View {
     @State private var selectedPeer: NearbyPeer?
     @State private var searchText = ""
     @State private var filter: PeerFilter = .all
+    @State private var showingDisplayNameEditor = false
 
     init(
         drinks: [Drink],
         sharedStore: SharedCompendiumStore,
+        tasteStatsStore: TasteExchangeStatsStore,
         displayName: String,
         draftDisplayName: Binding<String>,
         onSaveDisplayName: @escaping (String) -> Void,
@@ -59,6 +64,7 @@ private struct NearbyTransferSessionView: View {
     ) {
         self.drinks = drinks
         self.sharedStore = sharedStore
+        self.tasteStatsStore = tasteStatsStore
         self.displayName = displayName
         _draftDisplayName = draftDisplayName
         self.onSaveDisplayName = onSaveDisplayName
@@ -88,6 +94,12 @@ private struct NearbyTransferSessionView: View {
                         } label: {
                             Label("AirDrop/系统分享", systemImage: "square.and.arrow.up")
                         }
+
+                        Button {
+                            showingDisplayNameEditor = true
+                        } label: {
+                            Label("修改本机 ID", systemImage: "person.text.rectangle")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -96,6 +108,7 @@ private struct NearbyTransferSessionView: View {
             .onAppear {
                 draftDisplayName = manager.localDisplayName
                 manager.onReceivedPackage = importPackage(at:)
+                manager.onSentPackage = recordSentPackage(to:)
                 manager.makePackageData = makePackageData
                 manager.start()
             }
@@ -145,6 +158,16 @@ private struct NearbyTransferSessionView: View {
                 ActivityShareView(items: [package.url])
                     .ignoresSafeArea()
             }
+            .sheet(isPresented: $showingDisplayNameEditor) {
+                DisplayNameEditor(
+                    draftDisplayName: $draftDisplayName,
+                    onSave: { name in
+                        onSaveDisplayName(name)
+                        showingDisplayNameEditor = false
+                    }
+                )
+                .presentationDetents([.height(230)])
+            }
         }
     }
 
@@ -162,37 +185,84 @@ private struct NearbyTransferSessionView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("\(drinks.count) 杯")
-                        .font(.headline)
-                    Text(String(format: "均分 %.2f", averageRating))
-                        .font(.caption)
+                    Text(String(format: "%.2f", tasteScore.score))
+                        .font(.system(size: 42, weight: .black, design: .rounded).monospacedDigit())
+                    Text(tasteScore.levelName)
+                        .font(.subheadline.weight(.black))
+                    Text("会喝指数")
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
             }
 
             HStack(spacing: 10) {
-                TextField("本机 ID", text: $draftDisplayName)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-                    .background(Color(.secondarySystemGroupedBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                summaryPill(value: "\(drinks.count)", label: "杯")
+                summaryPill(value: String(format: "%.2f", averageRating), label: "均分")
+                summaryPill(value: String(format: "%.1f", Double(tasteScore.components.successfulExchangeCount)), label: "交换")
+                summaryPill(value: String(format: "%.1f", Double(tasteScore.components.totalCupCount)), label: "总杯")
+            }
 
-                Button("保存") {
-                    onSaveDisplayName(draftDisplayName)
+            HStack(spacing: 8) {
+                scoreComponentPill(
+                    "合意",
+                    tasteScore.components.agreement,
+                    isAvailable: tasteScore.components.hasAgreementSample
+                )
+                scoreComponentPill("权威", tasteScore.components.authority)
+            }
+
+            if favoriteBrands.isEmpty {
+                Text("还没有品牌均分")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(Array(favoriteBrands.enumerated()), id: \.element.id) { index, brand in
+                        FavoriteBrandRow(rank: index + 1, summary: brand)
+                    }
                 }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(.black)
-                .clipShape(Capsule())
             }
         }
         .padding()
         .background(.white)
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private func summaryPill(value: String, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.headline.monospacedDigit())
+            Text(label)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func scoreComponentPill(_ label: String, _ value: Double, isAvailable: Bool = true) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.caption2.weight(.black))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(.black)
+                .clipShape(Capsule())
+
+            Text(isAvailable ? String(format: "%.1f%%", value * 100) : "不可用")
+                .font(.caption.weight(.bold).monospacedDigit())
+                .foregroundStyle(isAvailable ? .primary : .tertiary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(Capsule())
     }
 
     private var statusCard: some View {
@@ -262,6 +332,36 @@ private struct NearbyTransferSessionView: View {
         return drinks.map(\.rating).reduce(0, +) / Double(drinks.count)
     }
 
+    private var tasteScore: TasteScoreResult {
+        TasteScoreCalculator.calculate(localDrinks: drinks, stats: tasteStatsStore.stats)
+    }
+
+    private var favoriteBrands: [FavoriteBrandSummary] {
+        let grouped = Dictionary(grouping: drinks) { drink in
+            let brand = drink.brand.trimmingCharacters(in: .whitespacesAndNewlines)
+            return brand.isEmpty ? "未知品牌" : brand
+        }
+
+        return grouped.map { brand, drinks in
+            FavoriteBrandSummary(
+                brand: brand,
+                drinkCount: drinks.count,
+                averageRating: drinks.map(\.rating).reduce(0, +) / Double(drinks.count)
+            )
+        }
+        .sorted {
+            if $0.drinkCount == $1.drinkCount {
+                if $0.averageRating == $1.averageRating {
+                    return $0.brand.localizedStandardCompare($1.brand) == .orderedAscending
+                }
+                return $0.averageRating > $1.averageRating
+            }
+            return $0.drinkCount > $1.drinkCount
+        }
+        .prefix(3)
+        .map { $0 }
+    }
+
     private var filteredPeers: [NearbyPeer] {
         manager.peers.filter { peer in
             let imported = isImported(peer)
@@ -327,11 +427,28 @@ private struct NearbyTransferSessionView: View {
         do {
             let data = try Data(contentsOf: url)
             let compendium = try sharedStore.importArchiveData(data)
+            let profile = TasteScoreCalculator.profile(from: compendium)
+            tasteStatsStore.recordSuccessfulExchange(
+                ownerID: compendium.ownerID,
+                ownerName: compendium.ownerName,
+                drinkCount: compendium.drinks.count,
+                averageRating: TasteScoreCalculator.averageRating(profile: profile),
+                profile: profile
+            )
             onImported(compendium)
             message = "已导入 \(compendium.ownerName) 的天梯图"
         } catch {
             message = error.localizedDescription
         }
+    }
+
+    private func recordSentPackage(to peer: NearbyPeer) {
+        tasteStatsStore.recordSuccessfulExchange(
+            ownerID: peer.stableID,
+            ownerName: peer.name,
+            drinkCount: peer.drinkCount,
+            averageRating: peer.averageRating
+        )
     }
 
     private static func summary(for drinks: [Drink], displayName: String) -> NearbyLocalSummary {
@@ -343,6 +460,93 @@ private struct NearbyTransferSessionView: View {
             averageRating: average,
             exportedAt: .now
         )
+    }
+}
+
+private struct FavoriteBrandSummary: Identifiable {
+    let brand: String
+    let drinkCount: Int
+    let averageRating: Double
+
+    var id: String {
+        brand
+    }
+}
+
+private struct FavoriteBrandRow: View {
+    let rank: Int
+    let summary: FavoriteBrandSummary
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(rank)")
+                .font(.caption.weight(.black))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(.black)
+                .clipShape(Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(summary.brand)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text("\(summary.drinkCount) 杯")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(String(format: "%.2f", summary.averageRating))
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+private struct DisplayNameEditor: View {
+    @Binding var draftDisplayName: String
+    let onSave: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 14) {
+                TextField("本机 ID", text: $draftDisplayName)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 11)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                Text("附近的人会用这个 ID 识别你的图鉴。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+            }
+            .padding(18)
+            .navigationTitle("修改本机 ID")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        onSave(draftDisplayName)
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
     }
 }
 

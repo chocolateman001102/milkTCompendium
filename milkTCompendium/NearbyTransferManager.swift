@@ -138,6 +138,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     @Published var pendingInvitation: NearbyInvitation?
 
     var onReceivedPackage: ((URL) -> Void)?
+    var onSentPackage: ((NearbyPeer) -> Void)?
     var makePackageData: (() async throws -> Data)?
 
     private static let serviceType = "mtc-share"
@@ -313,14 +314,19 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         statusMessage = "正在发送图鉴"
         session.sendResource(at: url, withName: url.lastPathComponent, toPeer: peerID) { [weak self] error in
             DispatchQueue.main.async {
-                self?.isSending = false
-                self?.pendingResourceURL = nil
-                self?.pendingPeerID = nil
+                guard let self else { return }
+                let sentPeer = self.peers.first { $0.peerID == peerID }
+                self.isSending = false
+                self.pendingResourceURL = nil
+                self.pendingPeerID = nil
                 try? FileManager.default.removeItem(at: url)
                 if let error {
-                    self?.statusMessage = "发送失败：\(error.localizedDescription)"
+                    self.statusMessage = "发送失败：\(error.localizedDescription)"
                 } else {
-                    self?.statusMessage = "已发送"
+                    if let sentPeer {
+                        self.onSentPackage?(sentPeer)
+                    }
+                    self.statusMessage = "已发送"
                 }
             }
         }

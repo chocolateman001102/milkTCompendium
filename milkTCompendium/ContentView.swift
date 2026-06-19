@@ -6,6 +6,7 @@ import UIKit
 
 struct ContentView: View {
     @StateObject private var sharedStore = SharedCompendiumStore()
+    @StateObject private var tasteStatsStore = TasteExchangeStatsStore()
     @State private var showingCamera = false
     @State private var showingPhotoPicker = false
     @State private var pendingCameraImage: UIImage?
@@ -15,7 +16,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            CollectionView(sharedStore: sharedStore, onStartCapture: {
+            CollectionView(sharedStore: sharedStore, tasteStatsStore: tasteStatsStore, onStartCapture: {
                 startCamera()
             }, onStartPhotoImport: {
                 showingPhotoPicker = true
