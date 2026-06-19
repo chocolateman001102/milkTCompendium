@@ -10,7 +10,7 @@ struct ProcessedDrinkImage {
 enum DrinkImageProcessor {
     static func process(_ image: UIImage) async throws -> ProcessedDrinkImage {
         let normalizedImage = image
-            .resizedAndNormalizedToFit(maxDimension: 1_400)
+            .resizedAndNormalizedToFit(maxDimension: 2_400)
         guard let cgImage = normalizedImage.cgImage else {
             throw ProcessingError.invalidImage
         }
@@ -44,7 +44,7 @@ enum DrinkImageProcessor {
                 let cutout = UIImage(cgImage: result)
                 return cutout
                     .bestUprightDrinkOrientation()
-                    .resizedAndNormalizedToFit(maxDimension: 900)
+                    .resizedAndNormalizedToFit(maxDimension: 1_800)
                     .addingStickerOutline()
             }
         }.value

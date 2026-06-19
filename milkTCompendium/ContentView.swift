@@ -32,7 +32,7 @@ struct ContentView: View {
                     guard let data = try await item.loadTransferable(type: Data.self) else {
                         return
                     }
-                    let image = try data.downsampledImage(maxDimension: 1_800)
+                    let image = try data.downsampledImage(maxDimension: 3_000)
                     await MainActor.run {
                         photoItem = nil
                         pendingNewDrinkPhoto = CapturedDrinkPhoto(image: image)
