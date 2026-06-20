@@ -12,6 +12,7 @@ final class Drink {
     var location: String
     var note: String = ""
     var isLimited: Bool = false
+    var cupCount: Int = 1
     var originalImageName: String?
     var stickerImageName: String?
     var createdAt: Date
@@ -26,6 +27,7 @@ final class Drink {
         location: String,
         note: String = "",
         isLimited: Bool = false,
+        cupCount: Int = 1,
         originalImageName: String?,
         stickerImageName: String?
     ) {
@@ -38,6 +40,7 @@ final class Drink {
         self.location = location
         self.note = note
         self.isLimited = isLimited
+        self.cupCount = max(1, cupCount)
         self.originalImageName = originalImageName
         self.stickerImageName = stickerImageName
         self.createdAt = .now

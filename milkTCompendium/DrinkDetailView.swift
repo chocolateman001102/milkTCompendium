@@ -72,6 +72,7 @@ struct FloatingDrinkCardOverlay: View {
                 HStack(spacing: 8) {
                     infoPill(title: "甜度", value: item.sweetness)
                     infoPill(title: "冰度", value: item.iceLevel)
+                    infoPill(title: "杯数", value: "\(item.cupCount)")
                 }
 
                 noteView

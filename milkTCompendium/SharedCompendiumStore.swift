@@ -25,8 +25,72 @@ struct SharedDrink: Codable, Identifiable {
     var location: String
     var note: String
     var isLimited: Bool
+    var cupCount: Int
     var stickerFileName: String?
     var createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case brand
+        case name
+        case sweetness
+        case iceLevel
+        case rating
+        case consumedAt
+        case location
+        case note
+        case isLimited
+        case cupCount
+        case stickerFileName
+        case createdAt
+    }
+
+    init(
+        id: String,
+        brand: String,
+        name: String,
+        sweetness: String,
+        iceLevel: String,
+        rating: Double,
+        consumedAt: Date,
+        location: String,
+        note: String,
+        isLimited: Bool,
+        cupCount: Int,
+        stickerFileName: String?,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.brand = brand
+        self.name = name
+        self.sweetness = sweetness
+        self.iceLevel = iceLevel
+        self.rating = rating
+        self.consumedAt = consumedAt
+        self.location = location
+        self.note = note
+        self.isLimited = isLimited
+        self.cupCount = max(1, cupCount)
+        self.stickerFileName = stickerFileName
+        self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        brand = try container.decode(String.self, forKey: .brand)
+        name = try container.decode(String.self, forKey: .name)
+        sweetness = try container.decode(String.self, forKey: .sweetness)
+        iceLevel = try container.decode(String.self, forKey: .iceLevel)
+        rating = try container.decode(Double.self, forKey: .rating)
+        consumedAt = try container.decode(Date.self, forKey: .consumedAt)
+        location = try container.decode(String.self, forKey: .location)
+        note = try container.decode(String.self, forKey: .note)
+        isLimited = try container.decode(Bool.self, forKey: .isLimited)
+        cupCount = max(1, try container.decodeIfPresent(Int.self, forKey: .cupCount) ?? 1)
+        stickerFileName = try container.decodeIfPresent(String.self, forKey: .stickerFileName)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+    }
 }
 
 struct SharedCompendiumArchive: Codable {
@@ -48,11 +112,87 @@ struct SharedDrinkArchive: Codable {
     var location: String
     var note: String
     var isLimited: Bool
+    var cupCount: Int
     var createdAt: Date
     var stickerData: Data?
     var stickerImageFormat: String?
     var stickerPixelWidth: Int?
     var stickerPixelHeight: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case brand
+        case name
+        case sweetness
+        case iceLevel
+        case rating
+        case consumedAt
+        case location
+        case note
+        case isLimited
+        case cupCount
+        case createdAt
+        case stickerData
+        case stickerImageFormat
+        case stickerPixelWidth
+        case stickerPixelHeight
+    }
+
+    init(
+        id: String,
+        brand: String,
+        name: String,
+        sweetness: String,
+        iceLevel: String,
+        rating: Double,
+        consumedAt: Date,
+        location: String,
+        note: String,
+        isLimited: Bool,
+        cupCount: Int,
+        createdAt: Date,
+        stickerData: Data?,
+        stickerImageFormat: String?,
+        stickerPixelWidth: Int?,
+        stickerPixelHeight: Int?
+    ) {
+        self.id = id
+        self.brand = brand
+        self.name = name
+        self.sweetness = sweetness
+        self.iceLevel = iceLevel
+        self.rating = rating
+        self.consumedAt = consumedAt
+        self.location = location
+        self.note = note
+        self.isLimited = isLimited
+        self.cupCount = max(1, cupCount)
+        self.createdAt = createdAt
+        self.stickerData = stickerData
+        self.stickerImageFormat = stickerImageFormat
+        self.stickerPixelWidth = stickerPixelWidth
+        self.stickerPixelHeight = stickerPixelHeight
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        brand = try container.decode(String.self, forKey: .brand)
+        name = try container.decode(String.self, forKey: .name)
+        sweetness = try container.decode(String.self, forKey: .sweetness)
+        iceLevel = try container.decode(String.self, forKey: .iceLevel)
+        rating = try container.decode(Double.self, forKey: .rating)
+        consumedAt = try container.decode(Date.self, forKey: .consumedAt)
+        location = try container.decode(String.self, forKey: .location)
+        note = try container.decode(String.self, forKey: .note)
+        isLimited = try container.decode(Bool.self, forKey: .isLimited)
+        cupCount = max(1, try container.decodeIfPresent(Int.self, forKey: .cupCount) ?? 1)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        stickerData = try container.decodeIfPresent(Data.self, forKey: .stickerData)
+        stickerImageFormat = try container.decodeIfPresent(String.self, forKey: .stickerImageFormat)
+        stickerPixelWidth = try container.decodeIfPresent(Int.self, forKey: .stickerPixelWidth)
+        stickerPixelHeight = try container.decodeIfPresent(Int.self, forKey: .stickerPixelHeight)
+    }
 }
 
 struct DrinkExportSnapshot: Sendable {
@@ -65,6 +205,7 @@ struct DrinkExportSnapshot: Sendable {
     var location: String
     var note: String
     var isLimited: Bool
+    var cupCount: Int
     var createdAt: Date
     var stickerImageName: String?
 }
@@ -74,7 +215,7 @@ final class SharedCompendiumStore: ObservableObject {
     @Published private(set) var compendiums: [SharedCompendium] = []
 
     private static let manifestName = "manifest.json"
-    nonisolated static let packageVersion = 2
+    nonisolated static let packageVersion = 3
     nonisolated private static let minimumSupportedPackageVersion = 1
 
     nonisolated private static var rootDirectory: URL {
@@ -144,6 +285,7 @@ final class SharedCompendiumStore: ObservableObject {
                 location: archivedDrink.location,
                 note: archivedDrink.note,
                 isLimited: archivedDrink.isLimited,
+                cupCount: max(1, archivedDrink.cupCount),
                 stickerFileName: stickerFileName,
                 createdAt: archivedDrink.createdAt
             )
@@ -178,6 +320,7 @@ final class SharedCompendiumStore: ObservableObject {
                 location: drink.location,
                 note: drink.note,
                 isLimited: drink.isLimited,
+                cupCount: max(1, drink.cupCount),
                 createdAt: drink.createdAt,
                 stickerImageName: drink.stickerImageName
             )
@@ -205,6 +348,7 @@ final class SharedCompendiumStore: ObservableObject {
                         location: snapshot.location,
                         note: snapshot.note,
                         isLimited: snapshot.isLimited,
+                        cupCount: max(1, snapshot.cupCount),
                         createdAt: snapshot.createdAt,
                         stickerData: sticker?.data,
                         stickerImageFormat: sticker?.format,

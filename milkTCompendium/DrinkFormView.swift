@@ -29,6 +29,7 @@ struct DrinkFormView: View {
     @State private var location = ""
     @State private var note = ""
     @State private var isLimited = false
+    @State private var cupCount = 1
 
     @State private var originalImage: UIImage?
     @State private var stickerImage: UIImage?
@@ -62,6 +63,7 @@ struct DrinkFormView: View {
             _location = State(initialValue: drink.location)
             _note = State(initialValue: drink.note)
             _isLimited = State(initialValue: drink.isLimited)
+            _cupCount = State(initialValue: max(1, drink.cupCount))
             _originalImage = State(initialValue: ImageStore.load(drink.originalImageName))
             _stickerImage = State(initialValue: ImageStore.load(drink.stickerImageName))
         }
@@ -150,22 +152,28 @@ struct DrinkFormView: View {
             get: { duplicateCandidate != nil },
             set: { if !$0 { duplicateCandidate = nil } }
         )) {
-            Button("更新旧记录") {
+            Button("+1 杯") {
+                if let duplicateCandidate {
+                    increment(duplicateCandidate)
+                }
+                duplicateCandidate = nil
+            }
+            Button("修正并 +1") {
                 if let duplicateCandidate {
                     save(updating: duplicateCandidate)
                 }
                 duplicateCandidate = nil
             }
-            Button("作为新记录") {
+            Button("忽略这次") {
                 duplicateCandidate = nil
-                saveAsNew()
+                dismiss()
             }
             Button("取消", role: .cancel) {
                 duplicateCandidate = nil
             }
         } message: {
             if let duplicateCandidate {
-                Text("\(duplicateCandidate.brand) · \(duplicateCandidate.name)\n评分 \(String(format: "%.2f", duplicateCandidate.rating))")
+                Text("\(duplicateCandidate.brand) · \(duplicateCandidate.name)\n已喝 \(duplicateCandidate.cupCount) 杯 · 评分 \(String(format: "%.2f", duplicateCandidate.rating))")
             }
         }
     }
@@ -258,6 +266,7 @@ struct DrinkFormView: View {
             OptionChips(title: "甜度", options: sweetnessOptions, selection: $sweetness)
             OptionChips(title: "冰度", options: iceOptions, selection: $iceLevel)
             LimitedToggle(isOn: $isLimited)
+            cupCountStepper
 
             DatePicker("饮用时间", selection: $consumedAt, displayedComponents: [.date, .hourAndMinute])
                 .font(.subheadline)
@@ -270,6 +279,19 @@ struct DrinkFormView: View {
     private var ratingCard: some View {
         Card(title: "评分") {
             RatingControl(value: $rating)
+        }
+    }
+
+    private var cupCountStepper: some View {
+        Stepper(value: $cupCount, in: 1...999) {
+            HStack {
+                Text("喝过杯数")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Text("\(cupCount) 杯")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -346,6 +368,7 @@ struct DrinkFormView: View {
                     location: location.trimmingCharacters(in: .whitespacesAndNewlines),
                     note: note.trimmingCharacters(in: .whitespacesAndNewlines),
                     isLimited: isLimited,
+                    cupCount: cupCount,
                     originalImageName: originalName,
                     stickerImageName: stickerName
                 )
@@ -361,6 +384,7 @@ struct DrinkFormView: View {
                 drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
                 drink.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
                 drink.isLimited = isLimited
+                drink.cupCount = max(1, cupCount)
 
                 if didChangeImage, let originalImage, let stickerImage {
                     drink.originalImageName = try ImageStore.saveOriginal(originalImage)
@@ -393,10 +417,22 @@ struct DrinkFormView: View {
             drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
             drink.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
             drink.isLimited = isLimited
+            drink.cupCount = max(1, drink.cupCount + 1)
             drink.originalImageName = try ImageStore.saveOriginal(originalImage)
             drink.stickerImageName = try ImageStore.saveSticker(stickerImage)
             try modelContext.save()
             BrandStore.remember(cleanedBrand)
+            onSaved()
+            dismiss()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func increment(_ drink: Drink) {
+        do {
+            drink.cupCount = max(1, drink.cupCount + 1)
+            try modelContext.save()
             onSaved()
             dismiss()
         } catch {

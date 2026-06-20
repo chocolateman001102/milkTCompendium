@@ -26,11 +26,16 @@ struct DrinkCardView: View {
                 .font(.footnote.weight(.medium))
                 .lineLimit(1)
 
-            Text(String(format: "%.2f", drink.rating))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Text(String(format: "%.2f", drink.rating))
+                if drink.cupCount > 1 {
+                    Text("x\(drink.cupCount)")
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(drink.brand)，\(drink.name)，评分 \(String(format: "%.2f", drink.rating))")
+        .accessibilityLabel("\(drink.brand)，\(drink.name)，\(drink.cupCount) 杯，评分 \(String(format: "%.2f", drink.rating))")
     }
 }

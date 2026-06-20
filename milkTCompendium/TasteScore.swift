@@ -4,6 +4,29 @@ struct TasteProfileDrink: Codable, Hashable {
     var brand: String
     var name: String
     var rating: Double
+    var cupCount: Int = 1
+
+    enum CodingKeys: String, CodingKey {
+        case brand
+        case name
+        case rating
+        case cupCount
+    }
+
+    init(brand: String, name: String, rating: Double, cupCount: Int = 1) {
+        self.brand = brand
+        self.name = name
+        self.rating = rating
+        self.cupCount = max(1, cupCount)
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        brand = try container.decode(String.self, forKey: .brand)
+        name = try container.decode(String.self, forKey: .name)
+        rating = try container.decode(Double.self, forKey: .rating)
+        cupCount = max(1, try container.decodeIfPresent(Int.self, forKey: .cupCount) ?? 1)
+    }
 }
 
 struct TastePeerSnapshot: Codable, Identifiable {
@@ -119,24 +142,46 @@ final class TasteExchangeStatsStore: ObservableObject {
 }
 
 enum TasteScoreCalculator {
-    private static let idealLogitMean = 0.925871272
-    private static let idealLogitStandardDeviation = 0.564801108
-    private static let targetScoreMean = 2.5
-    private static let targetScoreStandardDeviation = 1.1
-    private static let totalCupCeiling = 2200
-    private static let exchangeCeiling = 70
+    private static let scoreBaseline = 2.46
+    private static let scoreSpread = 2.0
+    private static let totalCupCenter = 350
+    private static let totalCupLogSpread = 0.62
+    private static let exchangeCenter = 10
+    private static let exchangeSpread = 4.2
+    private static let agreementCenter = 0.68
+    private static let agreementSpread = 0.15
+    private static let missingAgreementSignal = -0.5
+    private static let authorityCenter = 0.66
+    private static let authoritySpread = 0.17
+    private static let authorityRatingCenter = 3.0
 
     static func calculate(localDrinks: [Drink], stats: TasteExchangeStats) -> TasteScoreResult {
         let localProfile = localDrinks.map {
-            TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating)
+            TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating, cupCount: max(1, $0.cupCount))
         }
         return calculate(localProfile: localProfile, stats: stats)
     }
 
     static func profile(from compendium: SharedCompendium) -> [TasteProfileDrink] {
         compendium.drinks.map {
-            TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating)
+            TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating, cupCount: max(1, $0.cupCount))
         }
+    }
+
+    static func totalActualCupCount(drinks: [Drink]) -> Int {
+        drinks.map { max(1, $0.cupCount) }.reduce(0, +)
+    }
+
+    static func totalActualCupCount(profile: [TasteProfileDrink]) -> Int {
+        profile.map { max(1, $0.cupCount) }.reduce(0, +)
+    }
+
+    static func effectiveCupCount(drinks: [Drink]) -> Int {
+        drinks.map { effectiveCupContribution(for: $0.cupCount) }.reduce(0, +)
+    }
+
+    static func effectiveCupCount(profile: [TasteProfileDrink]) -> Int {
+        profile.map { effectiveCupContribution(for: $0.cupCount) }.reduce(0, +)
     }
 
     static func averageRating(profile: [TasteProfileDrink]) -> Double {
@@ -145,24 +190,28 @@ enum TasteScoreCalculator {
     }
 
     private static func calculate(localProfile: [TasteProfileDrink], stats: TasteExchangeStats) -> TasteScoreResult {
-        let totalCupCount = localProfile.count + stats.peers.map(\.drinkCount).reduce(0, +)
-        let totalCupComponent = normalizedLog(value: totalCupCount, ceiling: totalCupCeiling)
-        let exchangeComponent = normalizedLog(value: stats.successfulExchangeCount, ceiling: exchangeCeiling)
+        let totalCupCount = effectiveCupCount(profile: localProfile) + stats.peers.map(\.drinkCount).reduce(0, +)
         let agreement = agreementScore(localProfile: localProfile, peers: stats.peers)
         let authorityComponent = authorityScore(localProfile: localProfile)
+        let totalCupSignal = centeredLogSignal(value: totalCupCount, center: totalCupCenter, spread: totalCupLogSpread)
+        let exchangeSignal = centeredLinearSignal(value: stats.successfulExchangeCount, center: exchangeCenter, spread: exchangeSpread)
+        let agreementSignal = agreement.hasSample
+            ? centeredValueSignal(value: agreement.value, center: agreementCenter, spread: agreementSpread)
+            : missingAgreementSignal
+        let authoritySignal = centeredValueSignal(value: authorityComponent, center: authorityCenter, spread: authoritySpread)
 
-        let weighted =
-            totalCupComponent * 0.38 +
-            exchangeComponent * 0.32 +
-            agreement.value * 0.15 +
-            authorityComponent * 0.15
+        let weightedSignal =
+            totalCupSignal * 0.34 +
+            exchangeSignal * 0.26 +
+            agreementSignal * 0.17 +
+            authoritySignal * 0.23
 
-        let score = calibratedScore(from: weighted)
+        let score = clamp(scoreBaseline + weightedSignal * scoreSpread, lower: 0, upper: 5)
         return TasteScoreResult(
             score: score,
             components: TasteScoreComponents(
-                totalCup: totalCupComponent,
-                exchange: exchangeComponent,
+                totalCup: componentValue(from: totalCupSignal),
+                exchange: componentValue(from: exchangeSignal),
                 agreement: agreement.value,
                 hasAgreementSample: agreement.hasSample,
                 authority: authorityComponent,
@@ -172,29 +221,35 @@ enum TasteScoreCalculator {
         )
     }
 
-    private static func normalizedLog(value: Int, ceiling: Int) -> Double {
-        guard ceiling > 0 else { return 0 }
-        return clamp(log1p(Double(max(0, value))) / log1p(Double(ceiling)), lower: 0, upper: 1)
+    private static func centeredLogSignal(value: Int, center: Int, spread: Double) -> Double {
+        guard center > 0, spread > 0 else { return 0 }
+        let signal = (log1p(Double(max(0, value))) - log1p(Double(center))) / spread
+        return clamp(signal, lower: -1.2, upper: 2.4)
     }
 
-    private static func calibratedScore(from rawAbility: Double) -> Double {
-        let boundedAbility = clamp(rawAbility, lower: 0.001, upper: 0.999)
-        let logitAbility = log(boundedAbility / (1 - boundedAbility))
-        let zScore = (logitAbility - idealLogitMean) / idealLogitStandardDeviation
-        return clamp(
-            targetScoreMean + zScore * targetScoreStandardDeviation,
-            lower: 0,
-            upper: 5
-        )
+    private static func centeredLinearSignal(value: Int, center: Int, spread: Double) -> Double {
+        guard spread > 0 else { return 0 }
+        let signal = (Double(max(0, value)) - Double(center)) / spread
+        return clamp(signal, lower: -1.0, upper: 2.4)
+    }
+
+    private static func centeredValueSignal(value: Double, center: Double, spread: Double) -> Double {
+        guard spread > 0 else { return 0 }
+        let signal = (value - center) / spread
+        return clamp(signal, lower: -2.4, upper: 2.4)
+    }
+
+    private static func componentValue(from signal: Double) -> Double {
+        clamp(0.5 + signal / 4.8, lower: 0, upper: 1)
     }
 
     private static func authorityScore(localProfile: [TasteProfileDrink]) -> Double {
         guard !localProfile.isEmpty else { return 0.28 }
         let average = averageRating(profile: localProfile)
-        let sampleConfidence = 1 - exp(-Double(localProfile.count) / 36)
-        let centeredness = exp(-pow((average - 2.5) / 1.18, 2))
+        let sampleConfidence = 1 - exp(-Double(effectiveCupCount(profile: localProfile)) / 36)
+        let centeredness = exp(-pow((average - authorityRatingCenter) / 1.05, 2))
         let rawAuthority = sampleConfidence * centeredness
-        return min(rawAuthority, authorityCap(for: localProfile.count))
+        return min(rawAuthority, authorityCap(for: effectiveCupCount(profile: localProfile)))
     }
 
     private static func authorityCap(for localDrinkCount: Int) -> Double {
@@ -269,6 +324,11 @@ enum TasteScoreCalculator {
 
     private static func similarity(_ first: Double, _ second: Double) -> Double {
         clamp(1 - abs(first - second) / 5, lower: 0, upper: 1)
+    }
+
+    private static func effectiveCupContribution(for cupCount: Int) -> Int {
+        let actual = max(1, cupCount)
+        return max(1, Int((sqrt(Double(8 * actual + 1)) - 1) / 2))
     }
 
     private static func clamp(_ value: Double, lower: Double, upper: Double) -> Double {

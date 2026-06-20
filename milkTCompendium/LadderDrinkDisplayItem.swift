@@ -13,6 +13,7 @@ struct LadderDrinkDisplayItem: Identifiable {
     let location: String
     let note: String
     let isLimited: Bool
+    let cupCount: Int
     let stickerImageName: String?
     let stickerFileURL: URL?
     let createdAt: Date
@@ -53,6 +54,7 @@ struct LadderDrinkDisplayItem: Identifiable {
         location = drink.location
         note = drink.note
         isLimited = drink.isLimited
+        cupCount = max(1, drink.cupCount)
         stickerImageName = drink.stickerImageName
         stickerFileURL = nil
         createdAt = drink.createdAt
@@ -70,6 +72,7 @@ struct LadderDrinkDisplayItem: Identifiable {
         location = sharedDrink.location
         note = sharedDrink.note
         isLimited = sharedDrink.isLimited
+        cupCount = max(1, sharedDrink.cupCount)
         stickerImageName = nil
         stickerFileURL = SharedCompendiumStore.stickerURL(ownerID: ownerID, fileName: sharedDrink.stickerFileName)
         createdAt = sharedDrink.createdAt

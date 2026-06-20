@@ -7,6 +7,7 @@ struct NearbyPeer: Identifiable, Hashable {
     let stableID: String
     let ownerName: String
     let drinkCount: Int
+    let effectiveDrinkCount: Int
     let averageRating: Double
     let exportedAt: Date?
 
@@ -23,6 +24,7 @@ struct NearbyLocalSummary {
     let ownerID: String
     let ownerName: String
     let drinkCount: Int
+    let effectiveDrinkCount: Int
     let averageRating: Double
     let exportedAt: Date
 
@@ -31,6 +33,7 @@ struct NearbyLocalSummary {
             "ownerID": ownerID,
             "ownerName": ownerName,
             "drinkCount": "\(drinkCount)",
+            "effectiveDrinkCount": "\(effectiveDrinkCount)",
             "averageRating": String(format: "%.2f", averageRating),
             "exportedAt": ISO8601DateFormatter().string(from: exportedAt),
             "packageVersion": "\(SharedCompendiumStore.packageVersion)"
@@ -46,9 +49,9 @@ struct NearbyInvitation: Identifiable {
         var title: String {
             switch self {
             case .receivingCompendium:
-                return "接收图鉴"
+                return "接收档案"
             case .sharingMine:
-                return "发送图鉴"
+                return "发送档案"
             }
         }
     }
@@ -77,7 +80,6 @@ private struct NearbyControlMessage: Codable {
 
 enum NearbyDisplayNameStore {
     private static let displayNameKey = "NearbyTransferDisplayName"
-    private static let suffixKey = "NearbyTransferDisplayNameSuffix"
     private static let peerIDKey = "NearbyTransferStablePeerID"
 
     static var displayName: String {
@@ -96,29 +98,21 @@ enum NearbyDisplayNameStore {
     private static var defaultDisplayName: String {
         let deviceName = UIDevice.current.name.trimmingCharacters(in: .whitespacesAndNewlines)
         let genericNames: Set<String> = ["iPhone", "iPad", "iPod touch"]
-        let baseName = (!deviceName.isEmpty && !genericNames.contains(deviceName)) ? deviceName : "MilkT"
+        let baseName = (!deviceName.isEmpty && !genericNames.contains(deviceName)) ? deviceName : "我的档案"
         return cleanDisplayName(baseName)
-    }
-
-    private static var stableSuffix: String {
-        if let stored = UserDefaults.standard.string(forKey: suffixKey) {
-            return stored
-        }
-        let suffix = String(UUID().uuidString.prefix(4)).uppercased()
-        UserDefaults.standard.set(suffix, forKey: suffixKey)
-        return suffix
     }
 
     static func cleanDisplayName(_ name: String) -> String {
         let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let baseName = cleaned.isEmpty ? "MilkT" : cleaned
-        let suffix = "·\(stableSuffix)"
-        let nameWithoutOldSuffix = baseName.replacingOccurrences(
+        let baseName = cleaned.isEmpty ? "我的档案" : cleaned
+        let nameWithoutOldSuffix = baseName
+            .replacingOccurrences(
             of: #"·[A-F0-9]{4}$"#,
             with: "",
             options: .regularExpression
-        )
-        return String("\(nameWithoutOldSuffix)\(suffix)".prefix(48))
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((nameWithoutOldSuffix.isEmpty ? "我的档案" : nameWithoutOldSuffix).prefix(48))
     }
 
     static var stablePeerID: String {
@@ -188,12 +182,12 @@ final class NearbyTransferManager: NSObject, ObservableObject {
 
     func prepareToShare() {
         isSending = true
-        statusMessage = "正在准备图鉴文件"
+        statusMessage = "正在准备档案文件"
     }
 
     func finishPreparingShare() {
         isSending = false
-        statusMessage = "图鉴文件已准备好"
+        statusMessage = "档案文件已准备好"
     }
 
     func sendMine(to peer: NearbyPeer) {
@@ -208,7 +202,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func requestCompendium(from peer: NearbyPeer) {
-        statusMessage = "正在请求 \(peer.name) 的图鉴"
+        statusMessage = "正在请求 \(peer.name) 的档案"
         isSending = true
         pendingRequestPeerID = peer.peerID
         if session.connectedPeers.contains(peer.peerID) {
@@ -265,12 +259,12 @@ final class NearbyTransferManager: NSObject, ObservableObject {
 
     private func prepareAndSendPackage(to peerID: MCPeerID) {
         guard let makePackageData else {
-            failPendingSend("没有可发送的图鉴数据")
+            failPendingSend("没有可发送的档案数据")
             return
         }
 
         isSending = true
-        statusMessage = "正在打包图鉴"
+        statusMessage = "正在打包档案"
         Task {
             do {
                 let data = try await makePackageData()
@@ -311,7 +305,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             return
         }
 
-        statusMessage = "正在发送图鉴"
+        statusMessage = "正在发送档案"
         session.sendResource(at: url, withName: url.lastPathComponent, toPeer: peerID) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -337,7 +331,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         guard let data = try? JSONEncoder().encode(message) else { return }
         do {
             try session.send(data, toPeers: [peerID], with: .reliable)
-            statusMessage = "已请求对方图鉴"
+            statusMessage = "已请求对方档案"
         } catch {
             failPendingSend("请求失败：\(error.localizedDescription)")
         }
@@ -375,6 +369,7 @@ extension NearbyTransferManager: MCNearbyServiceBrowserDelegate {
                 stableID: stableID,
                 ownerName: info?["ownerName"] ?? peerID.displayName,
                 drinkCount: Int(info?["drinkCount"] ?? "") ?? 0,
+                effectiveDrinkCount: Int(info?["effectiveDrinkCount"] ?? "") ?? Int(info?["drinkCount"] ?? "") ?? 0,
                 averageRating: Double(info?["averageRating"] ?? "") ?? 0,
                 exportedAt: date
             )
@@ -461,7 +456,7 @@ extension NearbyTransferManager: MCSessionDelegate {
             self.isSending = false
             self.sendTimeoutID = nil
             self.pendingRequestPeerID = nil
-            self.statusMessage = "已收到 \(peerID.displayName) 的图鉴"
+            self.statusMessage = "已收到 \(peerID.displayName) 的档案"
             self.onReceivedPackage?(localURL)
         }
     }
@@ -482,6 +477,6 @@ extension NearbyTransferManager: MCSessionDelegate {
         fromPeer peerID: MCPeerID,
         with progress: Progress
     ) {
-        updateStatus("正在接收 \(peerID.displayName) 的图鉴")
+        updateStatus("正在接收 \(peerID.displayName) 的档案")
     }
 }

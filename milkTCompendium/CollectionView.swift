@@ -292,8 +292,13 @@ struct CollectionView: View {
     }
 
     private var currentCompendiumSubtitle: String {
-        let count = displayItems.count
-        return isShowingMine ? "\(tasteScore.levelName) · \(String(format: "%.2f", tasteScore.score)) · \(count) 杯" : "共享图鉴 · \(count) 杯"
+        if isShowingMine {
+            let cupCount = TasteScoreCalculator.effectiveCupCount(drinks: drinks)
+            let collectionCount = drinks.count
+            return "\(tasteScore.levelName) · \(String(format: "%.2f", tasteScore.score)) · \(cupCount) 杯 · \(collectionCount) 项"
+        }
+
+        return "共享图鉴 · \(displayItems.count) 项"
     }
 
     private var tasteScore: TasteScoreResult {

@@ -84,7 +84,7 @@ private struct NearbyTransferSessionView: View {
                 .padding(18)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle("近场互传")
+            .navigationTitle("档案")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -98,7 +98,7 @@ private struct NearbyTransferSessionView: View {
                         Button {
                             showingDisplayNameEditor = true
                         } label: {
-                            Label("修改本机 ID", systemImage: "person.text.rectangle")
+                            Label("修改档案名", systemImage: "person.text.rectangle")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -126,7 +126,7 @@ private struct NearbyTransferSessionView: View {
             .alert(item: $manager.pendingInvitation) { invitation in
                 Alert(
                     title: Text(invitation.mode.title),
-                    message: Text(invitation.mode == .receivingCompendium ? "\(invitation.peerName) 想发送图鉴给你" : "\(invitation.peerName) 想查看你的图鉴"),
+                    message: Text(invitation.mode == .receivingCompendium ? "\(invitation.peerName) 想发送档案给你" : "\(invitation.peerName) 想查看你的档案"),
                     primaryButton: .default(Text("同意")) {
                         manager.acceptInvitation()
                     },
@@ -172,59 +172,92 @@ private struct NearbyTransferSessionView: View {
     }
 
     private var myCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("我的图鉴")
-                        .font(.caption.weight(.medium))
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("会喝档案", systemImage: "person.crop.circle.badge.checkmark")
+                        .font(.caption.weight(.black))
                         .foregroundStyle(.secondary)
+
                     Text(displayName)
-                        .font(.title3.weight(.semibold))
+                        .font(.system(size: 28, weight: .black, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                 }
 
-                Spacer()
+                Spacer(minLength: 8)
 
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(String(format: "%.2f", tasteScore.score))
-                        .font(.system(size: 42, weight: .black, design: .rounded).monospacedDigit())
-                    Text(tasteScore.levelName)
-                        .font(.subheadline.weight(.black))
-                    Text("会喝指数")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
+                scoreBadge
             }
 
-            HStack(spacing: 10) {
-                summaryPill(value: "\(drinks.count)", label: "杯")
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                summaryPill(value: "\(profileCupCount)", label: "总杯")
+                summaryPill(value: "\(drinks.count)", label: "收集")
                 summaryPill(value: String(format: "%.2f", averageRating), label: "均分")
                 summaryPill(value: "\(tasteStatsStore.stats.peers.count)", label: "交换")
-                summaryPill(value: "\(tasteScore.components.totalCupCount)", label: "互换总杯")
             }
 
-            if favoriteBrands.isEmpty {
-                Text("还没有品牌均分")
-                    .font(.subheadline)
+            VStack(alignment: .leading, spacing: 9) {
+                Text("前三品牌")
+                    .font(.caption.weight(.black))
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, 8)
-            } else {
-                VStack(spacing: 8) {
-                    ForEach(Array(favoriteBrands.enumerated()), id: \.element.id) { index, brand in
-                        FavoriteBrandRow(rank: index + 1, summary: brand)
+
+                if favoriteBrands.isEmpty {
+                    Text("记录几杯之后，这里会长出你的口味坐标。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 6)
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(Array(favoriteBrands.enumerated()), id: \.element.id) { index, brand in
+                            FavoriteBrandRow(rank: index + 1, summary: brand)
+                        }
                     }
                 }
             }
         }
-        .padding()
-        .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .padding(18)
+        .background {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(.white)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(.black.opacity(0.08), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.07), radius: 18, y: 8)
+    }
+
+    private var scoreBadge: some View {
+        VStack(spacing: 3) {
+            Text("会喝指数")
+                .font(.caption2.weight(.black))
+                .foregroundStyle(.secondary)
+            Text(String(format: "%.2f", tasteScore.score))
+                .font(.system(size: 40, weight: .black, design: .rounded).monospacedDigit())
+                .foregroundStyle(.primary)
+            Text(tasteScore.levelName)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 11)
+        .frame(minWidth: 104)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.black.opacity(0.08), lineWidth: 1)
+        )
     }
 
     private func summaryPill(value: String, label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.headline.monospacedDigit())
+                .font(.headline.weight(.black).monospacedDigit())
             Text(label)
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.secondary)
@@ -232,55 +265,76 @@ private struct NearbyTransferSessionView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private func scoreComponentPill(_ label: String, _ value: Double, isAvailable: Bool = true) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-                .font(.caption2.weight(.black))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(.black)
-                .clipShape(Capsule())
-
-            Text(isAvailable ? String(format: "%.1f%%", value * 100) : "不可用")
-                .font(.caption.weight(.bold).monospacedDigit())
-                .foregroundStyle(isAvailable ? .primary : .tertiary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color(.secondarySystemGroupedBackground))
-        .clipShape(Capsule())
+        .background(.white.opacity(0.76))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(.black.opacity(0.07), lineWidth: 1)
+        )
     }
 
     private var statusCard: some View {
         HStack(spacing: 12) {
-            ProgressView()
-                .opacity(manager.isSending || manager.peers.isEmpty ? 1 : 0)
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(manager.isSending ? Color.orange.opacity(0.18) : Color.green.opacity(0.16))
+                Image(systemName: manager.isSending ? "shippingbox.fill" : "dot.radiowaves.left.and.right")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(manager.isSending ? .orange : .green)
+            }
+            .frame(width: 42, height: 42)
 
-            Text(manager.statusMessage)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(manager.isSending ? "传输中" : "交换雷达")
+                    .font(.subheadline.weight(.black))
+                Text(manager.statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
 
             Spacer()
+
+            if manager.isSending || manager.peers.isEmpty {
+                ProgressView()
+            } else {
+                Text("\(manager.peers.count)")
+                    .font(.headline.weight(.black).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(.secondarySystemGroupedBackground))
+                    .clipShape(Capsule())
+            }
         }
-        .padding()
+        .padding(14)
         .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(.black.opacity(0.07), lineWidth: 1)
+        )
     }
 
     private var controls: some View {
-        VStack(spacing: 10) {
-            TextField("搜索附近的人", text: $searchText)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(.horizontal, 14)
-                .padding(.vertical, 11)
-                .background(.white)
-                .clipShape(Capsule())
+        VStack(spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                TextField("搜索档案", text: $searchText)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            .background(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(.black.opacity(0.07), lineWidth: 1)
+            )
 
             Picker("筛选", selection: $filter) {
                 ForEach(PeerFilter.allCases) { filter in
@@ -293,14 +347,20 @@ private struct NearbyTransferSessionView: View {
 
     private var partyWall: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("附近的人")
-                .font(.headline)
+            HStack {
+                Text("附近档案")
+                    .font(.headline.weight(.black))
+                Spacer()
+                Text("\(filteredPeers.count) 个")
+                    .font(.caption.weight(.bold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
 
             if filteredPeers.isEmpty {
                 ContentUnavailableView(
-                    "等待附近的人",
+                    "等待附近档案",
                     systemImage: "dot.radiowaves.left.and.right",
-                    description: Text("让对方也打开近场互传")
+                    description: Text("让对方也打开档案页")
                 )
                 .frame(maxWidth: .infinity, minHeight: 220)
             } else {
@@ -323,6 +383,10 @@ private struct NearbyTransferSessionView: View {
         return drinks.map(\.rating).reduce(0, +) / Double(drinks.count)
     }
 
+    private var profileCupCount: Int {
+        TasteScoreCalculator.effectiveCupCount(drinks: drinks)
+    }
+
     private var tasteScore: TasteScoreResult {
         TasteScoreCalculator.calculate(localDrinks: drinks, stats: tasteStatsStore.stats)
     }
@@ -336,7 +400,7 @@ private struct NearbyTransferSessionView: View {
         return grouped.map { brand, drinks in
             FavoriteBrandSummary(
                 brand: brand,
-                drinkCount: drinks.count,
+                drinkCount: drinks.map { max(1, $0.cupCount) }.reduce(0, +),
                 averageRating: drinks.map(\.rating).reduce(0, +) / Double(drinks.count)
             )
         }
@@ -422,12 +486,12 @@ private struct NearbyTransferSessionView: View {
             tasteStatsStore.recordSuccessfulExchange(
                 ownerID: compendium.ownerID,
                 ownerName: compendium.ownerName,
-                drinkCount: compendium.drinks.count,
+                drinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
                 averageRating: TasteScoreCalculator.averageRating(profile: profile),
                 profile: profile
             )
             onImported(compendium)
-            message = "已导入 \(compendium.ownerName) 的天梯图"
+            message = "已导入 \(compendium.ownerName) 的档案"
         } catch {
             message = error.localizedDescription
         }
@@ -437,7 +501,7 @@ private struct NearbyTransferSessionView: View {
         tasteStatsStore.recordSuccessfulExchange(
             ownerID: peer.stableID,
             ownerName: peer.name,
-            drinkCount: peer.drinkCount,
+            drinkCount: peer.effectiveDrinkCount,
             averageRating: peer.averageRating
         )
     }
@@ -447,7 +511,8 @@ private struct NearbyTransferSessionView: View {
         return NearbyLocalSummary(
             ownerID: SharedCompendiumStore.localOwnerID,
             ownerName: displayName,
-            drinkCount: drinks.count,
+            drinkCount: TasteScoreCalculator.totalActualCupCount(drinks: drinks),
+            effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(drinks: drinks),
             averageRating: average,
             exportedAt: .now
         )
@@ -507,7 +572,7 @@ private struct DisplayNameEditor: View {
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
-                TextField("本机 ID", text: $draftDisplayName)
+                TextField("档案名", text: $draftDisplayName)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .padding(.horizontal, 12)
@@ -515,14 +580,14 @@ private struct DisplayNameEditor: View {
                     .background(Color(.secondarySystemGroupedBackground))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                Text("附近的人会用这个 ID 识别你的图鉴。")
+                Text("附近的人会用这个名字识别你的档案。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
                 Spacer()
             }
             .padding(18)
-            .navigationTitle("修改本机 ID")
+            .navigationTitle("修改档案名")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -546,41 +611,58 @@ private struct PeerCard: View {
     let isImported: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(peer.name)
-                    .font(.headline)
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .top, spacing: 10) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(isImported ? Color.green.opacity(0.16) : Color.black.opacity(0.08))
+                    Image(systemName: isImported ? "checkmark.seal.fill" : "person.wave.2.fill")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(isImported ? .green : .primary)
+                }
+                .frame(width: 38, height: 38)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(peer.name)
+                        .font(.headline.weight(.black))
+                        .lineLimit(1)
+                    Text(isImported ? "已在共享图鉴" : "可交换档案")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isImported ? .green : .secondary)
+                }
+
                 Spacer()
-                Circle()
-                    .fill(isImported ? .green : .black)
-                    .frame(width: 8, height: 8)
             }
 
-            HStack(spacing: 10) {
-                stat("\(peer.drinkCount)", "杯")
+            HStack(spacing: 8) {
+                stat("\(peer.drinkCount)", "总杯")
                 stat(String(format: "%.2f", peer.averageRating), "均分")
             }
-
-            Text(isImported ? "已导入" : "可交换")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(isImported ? .green : .secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
+        .padding(14)
         .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .shadow(color: .black.opacity(0.05), radius: 10, y: 4)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(isImported ? Color.green.opacity(0.22) : Color.black.opacity(0.07), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.045), radius: 10, y: 4)
     }
 
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.subheadline.weight(.semibold))
+                .font(.subheadline.weight(.black).monospacedDigit())
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -600,21 +682,21 @@ private struct PeerExchangePanel: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(peer.name)
-                    .font(.title2.weight(.semibold))
-                Text("\(peer.drinkCount) 杯 · 均分 \(String(format: "%.2f", peer.averageRating)) · \(isImported ? "已导入" : "未导入")")
+                    .font(.title2.weight(.black))
+                Text("\(peer.drinkCount) 总杯 · 均分 \(String(format: "%.2f", peer.averageRating)) · \(isImported ? "已导入" : "未导入")")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
 
             Button(action: onSend) {
-                Label("发送我的图鉴", systemImage: "arrow.up.circle.fill")
+                Label("发送我的档案", systemImage: "arrow.up.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
             Button(action: onRequest) {
-                Label("请求对方图鉴", systemImage: "arrow.down.circle")
+                Label("请求对方档案", systemImage: "arrow.down.circle")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
