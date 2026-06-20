@@ -40,7 +40,6 @@ struct DrinkFormView: View {
     @State private var showingBrandPicker = false
     @State private var showingStickerPreview = false
     @State private var isProcessing = false
-    @State private var isRecognizingText = false
     @State private var duplicateCandidate: Drink?
     @State private var errorMessage: String?
 
@@ -246,21 +245,6 @@ struct DrinkFormView: View {
             }
             .disabled(isProcessing)
 
-            if originalImage != nil {
-                Button {
-                    recognizeText()
-                } label: {
-                    if isRecognizingText {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        Text("尝试识别")
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .disabled(isProcessing || isRecognizingText)
-            }
         }
     }
 
@@ -441,40 +425,6 @@ struct DrinkFormView: View {
             .replacingOccurrences(of: "_", with: "")
             .replacingOccurrences(of: "·", with: "")
             .replacingOccurrences(of: "・", with: "")
-    }
-
-    private func recognizeText() {
-        guard let image = originalImage else { return }
-        isRecognizingText = true
-        Task {
-            do {
-                let result = try await DrinkTextRecognizer.recognize(from: image)
-                await MainActor.run {
-                    applyRecognizedInfo(result)
-                    isRecognizingText = false
-                }
-            } catch {
-                await MainActor.run {
-                    isRecognizingText = false
-                    errorMessage = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func applyRecognizedInfo(_ info: RecognizedDrinkInfo) {
-        if brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recognizedBrand = info.brand {
-            brand = recognizedBrand
-        }
-        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let recognizedName = info.name {
-            name = recognizedName
-        }
-        if let recognizedSweetness = info.sweetness {
-            sweetness = recognizedSweetness
-        }
-        if let recognizedIceLevel = info.iceLevel {
-            iceLevel = recognizedIceLevel
-        }
     }
 
     private func hideKeyboard() {

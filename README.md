@@ -7,7 +7,6 @@
 - SwiftUI
 - SwiftData
 - Vision 前景抠图
-- Vision OCR 标签识别
 - iOS 17+
 
 使用 Xcode 打开 `milkTCompendium.xcodeproj`，选择开发团队后即可在真机或模拟器运行。拍照功能需要真机。
