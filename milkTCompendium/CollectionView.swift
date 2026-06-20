@@ -28,7 +28,7 @@ struct CollectionView: View {
     fileprivate static let defaultLadderScale: CGFloat = 0.44
     fileprivate static let labelFadeStartScale: CGFloat = 0.9
     fileprivate static let labelRevealScale: CGFloat = 1.1
-    private let ladderTopControlClearance: CGFloat = 200
+    private let ladderTopControlClearance: CGFloat = 142
     private static let preferredSameColumnRatingGap: Double = 0.20
     private static let iconCollisionTolerance: CGFloat = 4
 
@@ -114,25 +114,27 @@ struct CollectionView: View {
                 }
             }
 
-            VStack(spacing: 10) {
-                topControls
-
-                if !displayItems.isEmpty {
-                    LadderFilterBar(
-                        searchText: $searchText,
-                        selectedBrand: $selectedBrandFilter,
-                        selectedRatingBand: $selectedRatingBand,
-                        isExpanded: $isFilterPanelExpanded,
-                        brandOptions: brandFilterOptions,
-                        filteredCount: filteredDisplayItems.count,
-                        totalCount: displayItems.count,
-                        hasActiveFilter: hasActiveFilter,
-                        onClear: clearFilters
-                    )
-                }
-            }
+            LadderTopDock(
+                searchText: $searchText,
+                selectedBrand: $selectedBrandFilter,
+                selectedRatingBand: $selectedRatingBand,
+                isFilterPanelExpanded: $isFilterPanelExpanded,
+                isShowingMine: isShowingMine,
+                selectedCompendiumID: selectedCompendiumID,
+                currentCompendiumTitle: currentCompendiumTitle,
+                currentCompendiumSubtitle: currentCompactSubtitle,
+                sharedCompendiums: sharedStore.compendiums,
+                brandOptions: brandFilterOptions,
+                filteredCount: filteredDisplayItems.count,
+                totalCount: displayItems.count,
+                hasItems: !displayItems.isEmpty,
+                hasActiveFilter: hasActiveFilter,
+                onSwitchCompendium: switchCompendium,
+                onOpenProfile: { showingTransfer = true },
+                onClear: clearFilters
+            )
             .padding(.top, 12)
-            .padding(.horizontal, 18)
+            .padding(.horizontal, 12)
         }
         .background(Color(.systemGroupedBackground))
         .toolbar(.hidden, for: .navigationBar)
@@ -365,6 +367,14 @@ struct CollectionView: View {
         }
 
         return "共享图鉴 · \(displayItems.count) 项"
+    }
+
+    private var currentCompactSubtitle: String {
+        if isShowingMine {
+            return "\(String(format: "%.2f", tasteScore.score)) · \(drinks.count) 项"
+        }
+
+        return "\(displayItems.count) 项"
     }
 
     private var tasteScore: TasteScoreResult {
@@ -984,125 +994,198 @@ private enum LadderRatingBand: String, CaseIterable, Identifiable, Equatable {
     }
 }
 
-private struct LadderFilterBar: View {
+private struct LadderTopDock: View {
     @Binding var searchText: String
     @Binding var selectedBrand: String?
     @Binding var selectedRatingBand: LadderRatingBand
-    @Binding var isExpanded: Bool
+    @Binding var isFilterPanelExpanded: Bool
 
+    let isShowingMine: Bool
+    let selectedCompendiumID: String
+    let currentCompendiumTitle: String
+    let currentCompendiumSubtitle: String
+    let sharedCompendiums: [SharedCompendium]
     let brandOptions: [String]
     let filteredCount: Int
     let totalCount: Int
+    let hasItems: Bool
     let hasActiveFilter: Bool
+    let onSwitchCompendium: (String) -> Void
+    let onOpenProfile: () -> Void
     let onClear: () -> Void
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
+        VStack(spacing: 6) {
+            HStack(spacing: 7) {
+                compendiumMenu
+
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
 
                 TextField("搜索品牌、品名、口味", text: $searchText)
-                    .font(.subheadline.weight(.medium))
+                    .font(.caption.weight(.medium))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .submitLabel(.search)
 
-                Text("\(filteredCount)/\(totalCount)")
-                    .font(.caption2.weight(.bold).monospacedDigit())
-                    .foregroundStyle(hasActiveFilter ? .black : .secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 4)
-                    .background(hasActiveFilter ? Color.yellow.opacity(0.32) : Color.black.opacity(0.06))
-                    .clipShape(Capsule())
+                if hasItems {
+                    Text("\(filteredCount)/\(totalCount)")
+                        .font(.caption2.weight(.bold).monospacedDigit())
+                        .foregroundStyle(hasActiveFilter ? .primary : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(hasActiveFilter ? 0.09 : 0.045))
+                        .clipShape(Capsule())
+                }
 
                 Button {
                     withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
-                        isExpanded.toggle()
+                        isFilterPanelExpanded.toggle()
                     }
                 } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(isExpanded || hasActiveFilter ? .white : .primary)
-                        .frame(width: 32, height: 30)
-                        .background(isExpanded || hasActiveFilter ? Color.black.opacity(0.9) : Color.black.opacity(0.06))
-                        .clipShape(Capsule())
+                    dockIcon(
+                        systemName: "slider.horizontal.3",
+                        isActive: isFilterPanelExpanded || hasActiveFilter
+                    )
+                }
+                .disabled(!hasItems)
+                .buttonStyle(LeverControlButtonStyle())
+
+                if hasActiveFilter {
+                    Button(action: onClear) {
+                        dockIcon(systemName: "xmark", isActive: true)
+                    }
+                    .buttonStyle(LeverControlButtonStyle())
+                    .transition(.scale.combined(with: .opacity))
+                }
+
+                Button(action: onOpenProfile) {
+                    dockIcon(systemName: "dot.radiowaves.left.and.right", isActive: true)
                 }
                 .buttonStyle(LeverControlButtonStyle())
             }
+            .padding(5)
+            .background(.white.opacity(0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(.black.opacity(0.1), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.08), radius: 10, y: 5)
 
-            if isExpanded {
-                HStack(spacing: 8) {
-                    Menu {
-                        Button {
-                            selectedBrand = nil
-                        } label: {
-                            Label("全部品牌", systemImage: selectedBrand == nil ? "checkmark" : "tag")
-                        }
-
-                        ForEach(brandOptions, id: \.self) { brand in
-                            Button {
-                                selectedBrand = brand
-                            } label: {
-                                Label(brand, systemImage: selectedBrand == brand ? "checkmark" : "tag")
-                            }
-                        }
-                    } label: {
-                        filterChip(
-                            title: selectedBrand ?? "全部品牌",
-                            systemImage: "tag",
-                            isActive: selectedBrand != nil
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    Menu {
-                        ForEach(LadderRatingBand.allCases) { band in
-                            Button {
-                                selectedRatingBand = band
-                            } label: {
-                                Label(band.title, systemImage: selectedRatingBand == band ? "checkmark" : "line.3.horizontal.decrease")
-                            }
-                        }
-                    } label: {
-                        filterChip(
-                            title: selectedRatingBand.title,
-                            systemImage: "star.leadinghalf.filled",
-                            isActive: selectedRatingBand != .all
-                        )
-                    }
-                    .buttonStyle(.plain)
-
-                    Spacer(minLength: 0)
-
-                    if hasActiveFilter {
-                        Button(action: onClear) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.white)
-                                .frame(width: 28, height: 28)
-                                .background(Color.black.opacity(0.88))
-                                .clipShape(Circle())
-                        }
-                        .buttonStyle(LeverControlButtonStyle())
-                        .transition(.scale.combined(with: .opacity))
-                    }
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+            if isFilterPanelExpanded && hasItems {
+                filterPanel
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
+        .frame(maxWidth: 560)
+        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: isFilterPanelExpanded)
+        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: hasActiveFilter)
+    }
+
+    private var compendiumMenu: some View {
+        Menu {
+            Button {
+                onSwitchCompendium("mine")
+            } label: {
+                Label("我的", systemImage: isShowingMine ? "checkmark" : "cup.and.saucer")
+            }
+
+            ForEach(sharedCompendiums) { compendium in
+                Button {
+                    onSwitchCompendium(compendium.id)
+                } label: {
+                    Label(compendium.ownerName, systemImage: selectedCompendiumID == compendium.id ? "checkmark" : "book")
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(currentCompendiumTitle)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(currentCompendiumSubtitle)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: 82, alignment: .leading)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var filterPanel: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button {
+                    selectedBrand = nil
+                } label: {
+                    Label("全部品牌", systemImage: selectedBrand == nil ? "checkmark" : "tag")
+                }
+
+                ForEach(brandOptions, id: \.self) { brand in
+                    Button {
+                        selectedBrand = brand
+                    } label: {
+                        Label(brand, systemImage: selectedBrand == brand ? "checkmark" : "tag")
+                    }
+                }
+            } label: {
+                filterChip(
+                    title: selectedBrand ?? "全部品牌",
+                    systemImage: "tag",
+                    isActive: selectedBrand != nil
+                )
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                ForEach(LadderRatingBand.allCases) { band in
+                    Button {
+                        selectedRatingBand = band
+                    } label: {
+                        Label(band.title, systemImage: selectedRatingBand == band ? "checkmark" : "line.3.horizontal.decrease")
+                    }
+                }
+            } label: {
+                filterChip(
+                    title: selectedRatingBand.title,
+                    systemImage: "star.leadinghalf.filled",
+                    isActive: selectedRatingBand != .all
+                )
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+        }
         .padding(7)
-        .background(.white.opacity(0.96))
-        .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+        .background(.white.opacity(0.97))
+        .clipShape(RoundedRectangle(cornerRadius: 19, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 23, style: .continuous)
+            RoundedRectangle(cornerRadius: 19, style: .continuous)
                 .stroke(.black.opacity(0.1), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.08), radius: 12, y: 6)
-        .frame(maxWidth: 520)
-        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: isExpanded)
-        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: hasActiveFilter)
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
+    }
+
+    private func dockIcon(systemName: String, isActive: Bool) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(isActive ? .white : .primary)
+            .frame(width: 30, height: 30)
+            .background(isActive ? Color.black.opacity(0.9) : Color.black.opacity(0.055))
+            .clipShape(Capsule())
     }
 
     private func filterChip(title: String, systemImage: String, isActive: Bool) -> some View {
