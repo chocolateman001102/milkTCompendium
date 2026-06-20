@@ -384,29 +384,21 @@ struct CollectionView: View {
         let labelPadding = labelProfile.labelCollisionPadding
         let columnSpacing = profile.columnSpacing
         let nearestColumnDistance = columnSpacing * 0.43
-        let clusterWindow = max(
-            iconSize.height + iconPadding.height,
-            (labelHeight + labelPadding.height) * 0.72
-        )
-        let verticalStep = labelHeight + labelPadding.height + 6
 
-        layoutClusters(in: metrics, clusterWindow: clusterWindow).forEach { cluster in
-            let centerHash = cluster.reduce(0) { $0 + stableHash(for: $1) }
-            let startsRight = centerHash.isMultiple(of: 2)
-            let clusterOffsetCount = cluster.count > 1 ? cluster.count + 2 : 3
-            let clusterOffsets = verticalOffsetSequence(count: clusterOffsetCount, step: verticalStep)
+        ratingRows().forEach { row in
+            let anchorY = yPosition(for: row.rating, metrics: metrics)
+            let startsRight = row.key.isMultiple(of: 2)
 
-            cluster.enumerated().forEach { index, item in
-                let anchorY = yPosition(for: item.rating, metrics: metrics)
+            row.items.enumerated().forEach { index, item in
                 let preferredSide = alternatingSide(index: index, startsRight: startsRight)
                 let secondarySide = preferredSide == .left ? LadderSide.right : .left
-                let verticalOffsets = orderedOffsets(preferred: clusterOffsets[min(index, clusterOffsets.count - 1)], allOffsets: clusterOffsets)
+                let preferredColumn = index / 2
                 let labelWidth = labelWidth(for: item) * Self.labelLayoutCounterScale
 
                 let placement = bestPlacement(
                     anchorY: anchorY,
                     preferredSides: [preferredSide, secondarySide],
-                    verticalOffsets: verticalOffsets,
+                    preferredColumn: preferredColumn,
                     metrics: metrics,
                     nearestColumnDistance: nearestColumnDistance,
                     columnSpacing: columnSpacing,
@@ -420,7 +412,7 @@ struct CollectionView: View {
 
                 let position = CGPoint(
                     x: min(max(34, placement.position.x), metrics.size.width - 34),
-                    y: min(max(metrics.plotTop, placement.position.y), metrics.plotBottom)
+                    y: anchorY
                 )
                 let resolvedPlacement = LadderPlacement(
                     position: position,
@@ -465,47 +457,30 @@ struct CollectionView: View {
         }
     }
 
-    private func layoutClusters(in metrics: LadderMetrics, clusterWindow: CGFloat) -> [[LadderDrinkDisplayItem]] {
-        let orderedItems = sortedItems.sorted {
-            if $0.rating == $1.rating {
-                return stableHash(for: $0) < stableHash(for: $1)
+    private func ratingRows() -> [LadderRatingRow] {
+        Dictionary(grouping: sortedItems, by: ratingRowKey(for:))
+            .map { key, items in
+                LadderRatingRow(
+                    key: key,
+                    rating: Double(key) / 100,
+                    items: items.sorted {
+                        if $0.createdAt == $1.createdAt {
+                            return stableHash(for: $0) < stableHash(for: $1)
+                        }
+                        return $0.createdAt > $1.createdAt
+                    }
+                )
             }
-            return $0.rating > $1.rating
-        }
-        var clusters: [[LadderDrinkDisplayItem]] = []
-        var currentCluster: [LadderDrinkDisplayItem] = []
-        var previousY: CGFloat?
-
-        orderedItems.forEach { item in
-            let y = yPosition(for: item.rating, metrics: metrics)
-            if let previousY, abs(y - previousY) > clusterWindow, !currentCluster.isEmpty {
-                clusters.append(currentCluster)
-                currentCluster = [item]
-            } else {
-                currentCluster.append(item)
+            .sorted {
+                if $0.key == $1.key {
+                    return $0.items.count > $1.items.count
+                }
+                return $0.key > $1.key
             }
-            previousY = y
-        }
-
-        if !currentCluster.isEmpty {
-            clusters.append(currentCluster)
-        }
-        return clusters
     }
 
-    private func verticalOffsetSequence(count: Int, step: CGFloat) -> [CGFloat] {
-        (0..<count).map { index in
-            guard index > 0 else { return 0 }
-            let magnitude = CGFloat((index + 1) / 2) * step
-            return index.isMultiple(of: 2) ? magnitude : -magnitude
-        }
-    }
-
-    private func orderedOffsets(preferred: CGFloat, allOffsets: [CGFloat]) -> [CGFloat] {
-        ([preferred] + allOffsets + [0]).reduce(into: [CGFloat]()) { result, offset in
-            guard !result.contains(where: { abs($0 - offset) < 0.5 }) else { return }
-            result.append(offset)
-        }
+    private func ratingRowKey(for item: LadderDrinkDisplayItem) -> Int {
+        Int((min(5, max(0, item.rating)) * 100).rounded())
     }
 
     private func alternatingSide(index: Int, startsRight: Bool) -> LadderSide {
@@ -516,7 +491,7 @@ struct CollectionView: View {
     private func bestPlacement(
         anchorY: CGFloat,
         preferredSides: [LadderSide],
-        verticalOffsets: [CGFloat],
+        preferredColumn: Int,
         metrics: LadderMetrics,
         nearestColumnDistance: CGFloat,
         columnSpacing: CGFloat,
@@ -531,7 +506,7 @@ struct CollectionView: View {
         let candidates = placementCandidates(
             anchorY: anchorY,
             sides: preferredSides,
-            verticalOffsets: verticalOffsets,
+            preferredColumn: preferredColumn,
             metrics: metrics,
             maxColumn: maxColumn,
             nearestColumnDistance: nearestColumnDistance,
@@ -577,28 +552,39 @@ struct CollectionView: View {
     private func placementCandidates(
         anchorY: CGFloat,
         sides: [LadderSide],
-        verticalOffsets: [CGFloat],
+        preferredColumn: Int,
         metrics: LadderMetrics,
         maxColumn: Int,
         nearestColumnDistance: CGFloat,
         columnSpacing: CGFloat
     ) -> [LadderCandidate] {
-        verticalOffsets.flatMap { verticalOffset in
-            (0...maxColumn).flatMap { column in
-                sides.map { side in
+        columnOrder(preferredColumn: preferredColumn, maxColumn: maxColumn).flatMap { column in
+            sides.map { side in
                 LadderCandidate(
                     position: CGPoint(
                         x: xPosition(for: side, column: column, metrics: metrics, nearestColumnDistance: nearestColumnDistance, columnSpacing: columnSpacing),
-                        y: min(max(metrics.plotTop, anchorY + verticalOffset), metrics.plotBottom)
+                        y: anchorY
                     ),
-                        column: column,
-                        side: side,
-                        verticalOffset: verticalOffset,
-                        canShowLabel: false
-                    )
-                }
+                    column: column,
+                    side: side,
+                    verticalOffset: 0,
+                    canShowLabel: false
+                )
             }
         }
+    }
+
+    private func columnOrder(preferredColumn: Int, maxColumn: Int) -> [Int] {
+        let clampedPreferred = min(max(0, preferredColumn), maxColumn)
+        return (0...maxColumn)
+            .sorted {
+                let firstDistance = abs($0 - clampedPreferred)
+                let secondDistance = abs($1 - clampedPreferred)
+                if firstDistance == secondDistance {
+                    return $0 < $1
+                }
+                return firstDistance < secondDistance
+            }
     }
 
     private func bestCompactCandidate(_ candidates: [LadderCandidate]) -> LadderCandidate? {
@@ -617,7 +603,7 @@ struct CollectionView: View {
 
     private func placementScore(for candidate: LadderCandidate) -> CGFloat {
         var score = CGFloat(candidate.column) * 100
-        score += abs(candidate.verticalOffset) * 0.9
+        score += candidate.canShowLabel ? 0 : 12
         return score
     }
 
@@ -1166,6 +1152,12 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 private enum LadderSide {
     case left
     case right
+}
+
+private struct LadderRatingRow {
+    let key: Int
+    let rating: Double
+    let items: [LadderDrinkDisplayItem]
 }
 
 private struct LadderCandidate {
