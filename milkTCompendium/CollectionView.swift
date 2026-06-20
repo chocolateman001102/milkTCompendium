@@ -16,6 +16,10 @@ struct CollectionView: View {
     @State private var selectedItem: LadderDrinkDisplayItem?
     @State private var editingDrink: Drink?
     @State private var ladderScale: CGFloat = Self.defaultLadderScale
+    @State private var searchText = ""
+    @State private var selectedBrandFilter: String?
+    @State private var selectedRatingBand: LadderRatingBand = .all
+    @State private var isFilterPanelExpanded = false
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
     @StateObject private var ladderZoomState = LadderZoomState()
     let onStartCapture: () -> Void
@@ -50,13 +54,41 @@ struct CollectionView: View {
         return drinks.map(LadderDrinkDisplayItem.init(drink:))
     }
 
+    private var filteredDisplayItems: [LadderDrinkDisplayItem] {
+        displayItems
+            .filter(matchesActiveFilters)
+            .sorted(by: filteredSort)
+    }
+
     private var sortedItems: [LadderDrinkDisplayItem] {
-        displayItems.sorted {
+        filteredDisplayItems.sorted {
             if $0.rating == $1.rating {
+                let firstScore = searchRank(for: $0)
+                let secondScore = searchRank(for: $1)
+                if firstScore != secondScore {
+                    return firstScore > secondScore
+                }
                 return $0.createdAt > $1.createdAt
             }
             return $0.rating > $1.rating
         }
+    }
+
+    private var brandFilterOptions: [String] {
+        Array(
+            Set(
+                displayItems
+                    .map { $0.brand.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            )
+        )
+        .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    private var hasActiveFilter: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || selectedBrandFilter != nil
+            || selectedRatingBand != .all
     }
 
     var body: some View {
@@ -67,17 +99,49 @@ struct CollectionView: View {
                         .font(.callout.weight(.medium))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if filteredDisplayItems.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "line.3.horizontal.decrease.circle")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                        Text("没有匹配的饮品")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ratingLadder
                 }
             }
 
-            topControls
-                .padding(.top, 12)
-                .padding(.horizontal, 18)
+            VStack(spacing: 10) {
+                topControls
+
+                if !displayItems.isEmpty {
+                    LadderFilterBar(
+                        searchText: $searchText,
+                        selectedBrand: $selectedBrandFilter,
+                        selectedRatingBand: $selectedRatingBand,
+                        isExpanded: $isFilterPanelExpanded,
+                        brandOptions: brandFilterOptions,
+                        filteredCount: filteredDisplayItems.count,
+                        totalCount: displayItems.count,
+                        hasActiveFilter: hasActiveFilter,
+                        onClear: clearFilters
+                    )
+                }
+            }
+            .padding(.top, 12)
+            .padding(.horizontal, 18)
         }
         .background(Color(.systemGroupedBackground))
         .toolbar(.hidden, for: .navigationBar)
+        .onChange(of: selectedCompendiumID) { _, _ in
+            validateBrandFilter()
+        }
+        .onChange(of: brandFilterOptions) { _, _ in
+            validateBrandFilter()
+        }
         .overlay(alignment: .bottomTrailing) {
             CaptureBookmark(onCapture: {
                 onStartCapture()
@@ -214,12 +278,14 @@ struct CollectionView: View {
                             .position(entry.position)
                             .zIndex(isDraggedEntry ? 20_000 : 10_000 - Double(entry.position.y))
                             .allowsHitTesting(false)
+                            .transition(.opacity.combined(with: .scale(scale: 0.82)))
                             .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isDraggedEntry)
                             .animation(.spring(response: 0.2, dampingFraction: 0.68), value: isOverDeleteTarget)
                     }
                 }
                 .frame(width: layout.canvasSize.width, height: layout.canvasSize.height)
                 .contentShape(Rectangle())
+                .animation(.spring(response: 0.36, dampingFraction: 0.84), value: layout.contentSignature)
             }
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("评分天梯图")
@@ -305,6 +371,104 @@ struct CollectionView: View {
         TasteScoreCalculator.calculate(localDrinks: drinks, stats: tasteStatsStore.stats)
     }
 
+    private var normalizedSearchText: String {
+        normalizedSearch(searchText)
+    }
+
+    private func matchesActiveFilters(_ item: LadderDrinkDisplayItem) -> Bool {
+        if let selectedBrandFilter,
+           brandFilterOptions.contains(selectedBrandFilter),
+           item.brand.trimmingCharacters(in: .whitespacesAndNewlines) != selectedBrandFilter {
+            return false
+        }
+
+        guard selectedRatingBand.contains(item.rating) else {
+            return false
+        }
+
+        let query = normalizedSearchText
+        guard !query.isEmpty else {
+            return true
+        }
+
+        return searchRank(for: item, normalizedQuery: query) > 0
+    }
+
+    private func filteredSort(_ first: LadderDrinkDisplayItem, _ second: LadderDrinkDisplayItem) -> Bool {
+        let firstScore = searchRank(for: first)
+        let secondScore = searchRank(for: second)
+        if firstScore != secondScore {
+            return firstScore > secondScore
+        }
+        if first.rating != second.rating {
+            return first.rating > second.rating
+        }
+        return first.createdAt > second.createdAt
+    }
+
+    private func searchRank(for item: LadderDrinkDisplayItem) -> Int {
+        let query = normalizedSearchText
+        guard !query.isEmpty else { return 0 }
+        return searchRank(for: item, normalizedQuery: query)
+    }
+
+    private func searchRank(for item: LadderDrinkDisplayItem, normalizedQuery query: String) -> Int {
+        let fields = [
+            item.name,
+            item.brand,
+            item.sweetness,
+            item.iceLevel,
+            item.location,
+            item.note
+        ]
+        .map(normalizedSearch)
+        .filter { !$0.isEmpty }
+
+        var bestScore = 0
+        for (index, field) in fields.enumerated() {
+            let priority = max(0, 6 - index)
+            if field == query {
+                bestScore = max(bestScore, 120 + priority)
+            } else if field.hasPrefix(query) {
+                bestScore = max(bestScore, 96 + priority)
+            } else if field.contains(query) {
+                bestScore = max(bestScore, 78 + priority)
+            } else if orderedCharacterMatch(query: query, in: field) {
+                bestScore = max(bestScore, 46 + priority)
+            } else {
+                let overlap = characterOverlap(query: query, field: field)
+                if overlap > 0 {
+                    bestScore = max(bestScore, min(36, overlap * 8) + priority)
+                }
+            }
+        }
+        return bestScore
+    }
+
+    private func normalizedSearch(_ value: String) -> String {
+        value
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+            .filter { !$0.isWhitespace && !$0.isNewline && !$0.isPunctuation }
+    }
+
+    private func orderedCharacterMatch(query: String, in field: String) -> Bool {
+        guard !query.isEmpty else { return true }
+        var searchStart = field.startIndex
+        for character in query {
+            guard let foundIndex = field[searchStart...].firstIndex(of: character) else {
+                return false
+            }
+            searchStart = field.index(after: foundIndex)
+        }
+        return true
+    }
+
+    private func characterOverlap(query: String, field: String) -> Int {
+        let fieldCharacters = Set(field)
+        return Set(query).filter { fieldCharacters.contains($0) }.count
+    }
+
     private func switchCompendium(to id: String) {
         guard selectedCompendiumID != id else { return }
         selectedCompendiumID = id
@@ -313,6 +477,22 @@ struct CollectionView: View {
         dragTranslation = .zero
         isOverDeleteTarget = false
         ladderScale = Self.defaultLadderScale
+    }
+
+    private func clearFilters() {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+            searchText = ""
+            selectedBrandFilter = nil
+            selectedRatingBand = .all
+            isFilterPanelExpanded = false
+        }
+    }
+
+    private func validateBrandFilter() {
+        guard let selectedBrandFilter else { return }
+        if !brandFilterOptions.contains(selectedBrandFilter) {
+            self.selectedBrandFilter = nil
+        }
     }
 
     private var editingDrinkBinding: Binding<Bool> {
@@ -341,7 +521,7 @@ struct CollectionView: View {
 
     private func ladderLayoutCacheKey(for viewport: CGSize) -> String {
         let viewportKey = "\(Int(viewport.width.rounded()))x\(Int(viewport.height.rounded()))"
-        let itemKey = displayItems.map { item in
+        let itemKey = filteredDisplayItems.map { item in
             [
                 item.id,
                 String(format: "%.3f", item.rating),
@@ -352,11 +532,16 @@ struct CollectionView: View {
             ].joined(separator: "#")
         }
         .joined(separator: "|")
-        return "\(selectedCompendiumID):\(viewportKey):\(itemKey)"
+        let filterKey = [
+            normalizedSearchText,
+            selectedBrandFilter ?? "*",
+            selectedRatingBand.id
+        ].joined(separator: "#")
+        return "\(selectedCompendiumID):\(viewportKey):\(filterKey):\(itemKey)"
     }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
-        let drinkCount = CGFloat(max(displayItems.count, 1))
+        let drinkCount = CGFloat(max(filteredDisplayItems.count, 1))
         let densityHeight = 920 + drinkCount * 13
         let iconProfile = LadderLayoutProfile.stable.scaled(by: Self.layoutCounterScale)
         let labelProfile = LadderLayoutProfile.stable.scaledSizes(by: Self.labelLayoutCounterScale)
@@ -722,7 +907,7 @@ struct CollectionView: View {
     }
 
     private func maxRatingClusterCount(in ratingWindow: Double) -> Int {
-        let ratings = displayItems.map { min(5, max(0, $0.rating)) }.sorted()
+        let ratings = filteredDisplayItems.map { min(5, max(0, $0.rating)) }.sorted()
         guard !ratings.isEmpty else { return 1 }
         var maxCount = 1
         var start = 0
@@ -748,6 +933,195 @@ struct CollectionView: View {
         modelContext.delete(drink)
         try? modelContext.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+}
+
+private enum LadderRatingBand: String, CaseIterable, Identifiable, Equatable {
+    case all
+    case zeroToOne
+    case oneToTwo
+    case twoToThree
+    case threeToFour
+    case fourToFive
+
+    var id: String {
+        rawValue
+    }
+
+    var title: String {
+        switch self {
+        case .all:
+            return "全部分数"
+        case .zeroToOne:
+            return "0-1"
+        case .oneToTwo:
+            return "1-2"
+        case .twoToThree:
+            return "2-3"
+        case .threeToFour:
+            return "3-4"
+        case .fourToFive:
+            return "4-5"
+        }
+    }
+
+    func contains(_ rating: Double) -> Bool {
+        let clamped = min(5, max(0, rating))
+        switch self {
+        case .all:
+            return true
+        case .zeroToOne:
+            return clamped >= 0 && clamped < 1
+        case .oneToTwo:
+            return clamped >= 1 && clamped < 2
+        case .twoToThree:
+            return clamped >= 2 && clamped < 3
+        case .threeToFour:
+            return clamped >= 3 && clamped < 4
+        case .fourToFive:
+            return clamped >= 4 && clamped <= 5
+        }
+    }
+}
+
+private struct LadderFilterBar: View {
+    @Binding var searchText: String
+    @Binding var selectedBrand: String?
+    @Binding var selectedRatingBand: LadderRatingBand
+    @Binding var isExpanded: Bool
+
+    let brandOptions: [String]
+    let filteredCount: Int
+    let totalCount: Int
+    let hasActiveFilter: Bool
+    let onClear: () -> Void
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                TextField("搜索品牌、品名、口味", text: $searchText)
+                    .font(.subheadline.weight(.medium))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .submitLabel(.search)
+
+                Text("\(filteredCount)/\(totalCount)")
+                    .font(.caption2.weight(.bold).monospacedDigit())
+                    .foregroundStyle(hasActiveFilter ? .black : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(hasActiveFilter ? Color.yellow.opacity(0.32) : Color.black.opacity(0.06))
+                    .clipShape(Capsule())
+
+                Button {
+                    withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(isExpanded || hasActiveFilter ? .white : .primary)
+                        .frame(width: 32, height: 30)
+                        .background(isExpanded || hasActiveFilter ? Color.black.opacity(0.9) : Color.black.opacity(0.06))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(LeverControlButtonStyle())
+            }
+
+            if isExpanded {
+                HStack(spacing: 8) {
+                    Menu {
+                        Button {
+                            selectedBrand = nil
+                        } label: {
+                            Label("全部品牌", systemImage: selectedBrand == nil ? "checkmark" : "tag")
+                        }
+
+                        ForEach(brandOptions, id: \.self) { brand in
+                            Button {
+                                selectedBrand = brand
+                            } label: {
+                                Label(brand, systemImage: selectedBrand == brand ? "checkmark" : "tag")
+                            }
+                        }
+                    } label: {
+                        filterChip(
+                            title: selectedBrand ?? "全部品牌",
+                            systemImage: "tag",
+                            isActive: selectedBrand != nil
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Menu {
+                        ForEach(LadderRatingBand.allCases) { band in
+                            Button {
+                                selectedRatingBand = band
+                            } label: {
+                                Label(band.title, systemImage: selectedRatingBand == band ? "checkmark" : "line.3.horizontal.decrease")
+                            }
+                        }
+                    } label: {
+                        filterChip(
+                            title: selectedRatingBand.title,
+                            systemImage: "star.leadinghalf.filled",
+                            isActive: selectedRatingBand != .all
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    if hasActiveFilter {
+                        Button(action: onClear) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 28, height: 28)
+                                .background(Color.black.opacity(0.88))
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(LeverControlButtonStyle())
+                        .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(7)
+        .background(.white.opacity(0.96))
+        .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 23, style: .continuous)
+                .stroke(.black.opacity(0.1), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.08), radius: 12, y: 6)
+        .frame(maxWidth: 520)
+        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: isExpanded)
+        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: hasActiveFilter)
+    }
+
+    private func filterChip(title: String, systemImage: String, isActive: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .bold))
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 9, weight: .bold))
+                .opacity(0.68)
+        }
+        .foregroundStyle(isActive ? .white : .primary)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(isActive ? Color.black.opacity(0.88) : Color.black.opacity(0.06))
+        .clipShape(Capsule())
     }
 }
 
