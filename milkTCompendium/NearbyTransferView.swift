@@ -198,17 +198,8 @@ private struct NearbyTransferSessionView: View {
             HStack(spacing: 10) {
                 summaryPill(value: "\(drinks.count)", label: "杯")
                 summaryPill(value: String(format: "%.2f", averageRating), label: "均分")
-                summaryPill(value: String(format: "%.1f", Double(tasteScore.components.successfulExchangeCount)), label: "交换")
-                summaryPill(value: String(format: "%.1f", Double(tasteScore.components.totalCupCount)), label: "总杯")
-            }
-
-            HStack(spacing: 8) {
-                scoreComponentPill(
-                    "合意",
-                    tasteScore.components.agreement,
-                    isAvailable: tasteScore.components.hasAgreementSample
-                )
-                scoreComponentPill("权威", tasteScore.components.authority)
+                summaryPill(value: "\(tasteStatsStore.stats.peers.count)", label: "交换")
+                summaryPill(value: "\(tasteScore.components.totalCupCount)", label: "互换总杯")
             }
 
             if favoriteBrands.isEmpty {
