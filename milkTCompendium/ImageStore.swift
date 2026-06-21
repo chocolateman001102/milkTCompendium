@@ -1,8 +1,19 @@
+import ImageIO
 import UIKit
 
 enum ImageStore {
-    private static let imageCache = NSCache<NSString, UIImage>()
-    private static let thumbnailCache = NSCache<NSString, UIImage>()
+    private static let imageCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 80
+        cache.totalCostLimit = 120 * 1024 * 1024
+        return cache
+    }()
+    private static let thumbnailCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 200
+        cache.totalCostLimit = 60 * 1024 * 1024
+        return cache
+    }()
 
     private static var directory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -39,7 +50,7 @@ enum ImageStore {
         guard let image = UIImage(contentsOfFile: directory.appendingPathComponent(name).path) else {
             return nil
         }
-        imageCache.setObject(image, forKey: key)
+        imageCache.setObject(image, forKey: key, cost: cost(of: image))
         return image
     }
 
@@ -50,9 +61,10 @@ enum ImageStore {
             return cached
         }
 
-        guard let image = load(name) else { return nil }
-        let thumbnail = image.resizedThumbnail(maxPixel: maxPixel)
-        thumbnailCache.setObject(thumbnail, forKey: key)
+        guard let thumbnail = downsampledImage(at: directory.appendingPathComponent(name), maxPixel: maxPixel) else {
+            return nil
+        }
+        thumbnailCache.setObject(thumbnail, forKey: key, cost: cost(of: thumbnail))
         return thumbnail
     }
 
@@ -63,9 +75,8 @@ enum ImageStore {
             return cached
         }
 
-        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
-        let thumbnail = image.resizedThumbnail(maxPixel: maxPixel)
-        thumbnailCache.setObject(thumbnail, forKey: key)
+        guard let thumbnail = downsampledImage(at: url, maxPixel: maxPixel) else { return nil }
+        thumbnailCache.setObject(thumbnail, forKey: key, cost: cost(of: thumbnail))
         return thumbnail
     }
 
@@ -77,23 +88,34 @@ enum ImageStore {
     static func delete(_ name: String?) {
         guard let name else { return }
         imageCache.removeObject(forKey: name as NSString)
-        thumbnailCache.removeObject(forKey: "\(name)-120" as NSString)
+        thumbnailCache.removeAllObjects()
         try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
     }
-}
 
-private extension UIImage {
-    func resizedThumbnail(maxPixel: CGFloat) -> UIImage {
-        let longestSide = max(size.width, size.height)
-        guard longestSide > maxPixel else { return self }
-        let ratio = maxPixel / longestSide
-        let targetSize = CGSize(width: size.width * ratio, height: size.height * ratio)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = false
-        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
-            draw(in: CGRect(origin: .zero, size: targetSize))
+    private static func downsampledImage(at url: URL, maxPixel: CGFloat) -> UIImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else {
+            return nil
         }
+
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxPixel)
+        ] as CFDictionary
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    private static func cost(of image: UIImage) -> Int {
+        if let cgImage = image.cgImage {
+            return cgImage.bytesPerRow * cgImage.height
+        }
+        return Int(image.size.width * image.scale * image.size.height * image.scale * 4)
     }
 }
 

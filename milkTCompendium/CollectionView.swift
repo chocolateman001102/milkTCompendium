@@ -37,6 +37,13 @@ struct CollectionView: View {
     private static let layoutCounterScale: CGFloat = 1 / pow(defaultLadderScale, 0.46)
     private static let labelLayoutCounterScale: CGFloat = 1 / pow(labelRevealScale, 0.46)
 
+    private struct CollectionDerivedData {
+        var displayItems: [LadderDrinkDisplayItem]
+        var filteredItems: [LadderDrinkDisplayItem]
+        var sortedItems: [LadderDrinkDisplayItem]
+        var brandOptions: [String]
+    }
+
     private var isShowingMine: Bool {
         selectedCompendiumID == "mine"
     }
@@ -46,38 +53,65 @@ struct CollectionView: View {
     }
 
     private var displayItems: [LadderDrinkDisplayItem] {
-        if let activeSharedCompendium, !isShowingMine {
-            return activeSharedCompendium.drinks.map {
-                LadderDrinkDisplayItem(sharedDrink: $0, ownerID: activeSharedCompendium.ownerID)
-            }
-        }
-        return drinks.map(LadderDrinkDisplayItem.init(drink:))
+        derivedData.displayItems
     }
 
     private var filteredDisplayItems: [LadderDrinkDisplayItem] {
-        displayItems
-            .filter(matchesActiveFilters)
-            .sorted(by: filteredSort)
+        derivedData.filteredItems
     }
 
     private var sortedItems: [LadderDrinkDisplayItem] {
-        filteredDisplayItems.sorted {
-            if $0.rating == $1.rating {
-                let firstScore = searchRank(for: $0)
-                let secondScore = searchRank(for: $1)
-                if firstScore != secondScore {
-                    return firstScore > secondScore
-                }
-                return $0.createdAt > $1.createdAt
-            }
-            return $0.rating > $1.rating
-        }
+        derivedData.sortedItems
     }
 
     private var brandFilterOptions: [String] {
+        derivedData.brandOptions
+    }
+
+    private var derivedData: CollectionDerivedData {
+        let items: [LadderDrinkDisplayItem]
+        if let activeSharedCompendium, !isShowingMine {
+            items = activeSharedCompendium.drinks.map {
+                LadderDrinkDisplayItem(sharedDrink: $0, ownerID: activeSharedCompendium.ownerID)
+            }
+        } else {
+            items = drinks.map(LadderDrinkDisplayItem.init(drink:))
+        }
+
+        let brandOptions = Self.brandOptions(from: items)
+        let normalizedQuery = normalizedSearchText
+        let rankByID = Self.searchRanks(for: items, normalizedQuery: normalizedQuery)
+        let filteredItems = items
+            .filter { item in
+                matchesActiveFilters(item, brandOptions: brandOptions, normalizedQuery: normalizedQuery, rankByID: rankByID)
+            }
+            .sorted { first, second in
+                filteredSort(first, second, rankByID: rankByID)
+            }
+        let sortedItems = filteredItems.sorted { first, second in
+            if first.rating == second.rating {
+                let firstScore = rankByID[first.id] ?? 0
+                let secondScore = rankByID[second.id] ?? 0
+                if firstScore != secondScore {
+                    return firstScore > secondScore
+                }
+                return first.createdAt > second.createdAt
+            }
+            return first.rating > second.rating
+        }
+
+        return CollectionDerivedData(
+            displayItems: items,
+            filteredItems: filteredItems,
+            sortedItems: sortedItems,
+            brandOptions: brandOptions
+        )
+    }
+
+    private static func brandOptions(from items: [LadderDrinkDisplayItem]) -> [String] {
         Array(
             Set(
-                displayItems
+                items
                     .map { $0.brand.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
             )
@@ -265,8 +299,7 @@ struct CollectionView: View {
                         let liftScale: CGFloat = isDraggedEntry ? (isOverDeleteTarget ? 1.2 : 1.14) : 1
                         let liftOffset: CGFloat = isDraggedEntry ? -12 : 0
                         LadderDrinkNode(
-                            item: entry.item,
-                            canShowLabel: entry.canShowLabel,
+                            entry: entry,
                             zoomState: ladderZoomState
                         )
                             .scaleEffect(liftScale)
@@ -382,12 +415,26 @@ struct CollectionView: View {
     }
 
     private var normalizedSearchText: String {
-        normalizedSearch(searchText)
+        Self.normalizedSearch(searchText)
     }
 
     private func matchesActiveFilters(_ item: LadderDrinkDisplayItem) -> Bool {
+        matchesActiveFilters(
+            item,
+            brandOptions: brandFilterOptions,
+            normalizedQuery: normalizedSearchText,
+            rankByID: [item.id: searchRank(for: item)]
+        )
+    }
+
+    private func matchesActiveFilters(
+        _ item: LadderDrinkDisplayItem,
+        brandOptions: [String],
+        normalizedQuery query: String,
+        rankByID: [String: Int]
+    ) -> Bool {
         if let selectedBrandFilter,
-           brandFilterOptions.contains(selectedBrandFilter),
+           brandOptions.contains(selectedBrandFilter),
            item.brand.trimmingCharacters(in: .whitespacesAndNewlines) != selectedBrandFilter {
             return false
         }
@@ -396,17 +443,27 @@ struct CollectionView: View {
             return false
         }
 
-        let query = normalizedSearchText
         guard !query.isEmpty else {
             return true
         }
 
-        return searchRank(for: item, normalizedQuery: query) > 0
+        return (rankByID[item.id] ?? 0) > 0
     }
 
     private func filteredSort(_ first: LadderDrinkDisplayItem, _ second: LadderDrinkDisplayItem) -> Bool {
-        let firstScore = searchRank(for: first)
-        let secondScore = searchRank(for: second)
+        filteredSort(first, second, rankByID: [
+            first.id: searchRank(for: first),
+            second.id: searchRank(for: second)
+        ])
+    }
+
+    private func filteredSort(
+        _ first: LadderDrinkDisplayItem,
+        _ second: LadderDrinkDisplayItem,
+        rankByID: [String: Int]
+    ) -> Bool {
+        let firstScore = rankByID[first.id] ?? 0
+        let secondScore = rankByID[second.id] ?? 0
         if firstScore != secondScore {
             return firstScore > secondScore
         }
@@ -419,10 +476,17 @@ struct CollectionView: View {
     private func searchRank(for item: LadderDrinkDisplayItem) -> Int {
         let query = normalizedSearchText
         guard !query.isEmpty else { return 0 }
-        return searchRank(for: item, normalizedQuery: query)
+        return Self.searchRank(for: item, normalizedQuery: query)
     }
 
-    private func searchRank(for item: LadderDrinkDisplayItem, normalizedQuery query: String) -> Int {
+    private static func searchRanks(for items: [LadderDrinkDisplayItem], normalizedQuery query: String) -> [String: Int] {
+        guard !query.isEmpty else { return [:] }
+        return Dictionary(uniqueKeysWithValues: items.map { item in
+            (item.id, searchRank(for: item, normalizedQuery: query))
+        })
+    }
+
+    private static func searchRank(for item: LadderDrinkDisplayItem, normalizedQuery query: String) -> Int {
         let fields = [
             item.name,
             item.brand,
@@ -455,14 +519,14 @@ struct CollectionView: View {
         return bestScore
     }
 
-    private func normalizedSearch(_ value: String) -> String {
+    private static func normalizedSearch(_ value: String) -> String {
         value
             .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
             .lowercased()
             .filter { !$0.isWhitespace && !$0.isNewline && !$0.isPunctuation }
     }
 
-    private func orderedCharacterMatch(query: String, in field: String) -> Bool {
+    private static func orderedCharacterMatch(query: String, in field: String) -> Bool {
         guard !query.isEmpty else { return true }
         var searchStart = field.startIndex
         for character in query {
@@ -474,7 +538,7 @@ struct CollectionView: View {
         return true
     }
 
-    private func characterOverlap(query: String, field: String) -> Int {
+    private static func characterOverlap(query: String, field: String) -> Int {
         let fieldCharacters = Set(field)
         return Set(query).filter { fieldCharacters.contains($0) }.count
     }
@@ -589,6 +653,9 @@ struct CollectionView: View {
         let labelPadding = labelProfile.labelCollisionPadding
         let columnSpacing = iconProfile.columnSpacing
         let nearestColumnDistance = columnSpacing * 0.43
+        let entryMetrics = Dictionary(uniqueKeysWithValues: sortedItems.map { item in
+            (item.id, LadderDrinkEntryMetrics(item: item))
+        })
 
         rows.forEach { row in
             let anchorY = yPosition(for: row.rating, metrics: metrics)
@@ -598,7 +665,7 @@ struct CollectionView: View {
                 let preferredSide = alternatingSide(index: index, startsRight: startsRight)
                 let secondarySide = preferredSide == .left ? LadderSide.right : .left
                 let preferredColumn = index / 2
-                let labelWidth = labelWidth(for: item) * Self.labelLayoutCounterScale
+                let labelWidth = (entryMetrics[item.id]?.labelWidth ?? labelWidth(for: item)) * Self.labelLayoutCounterScale
 
                 let placement = bestPlacement(
                     anchorY: anchorY,
@@ -657,7 +724,8 @@ struct CollectionView: View {
                 item: item,
                 position: placement.position,
                 side: placement.side,
-                canShowLabel: placement.canShowLabel
+                canShowLabel: placement.canShowLabel,
+                metrics: entryMetrics[item.id] ?? LadderDrinkEntryMetrics(item: item)
             )
         }
     }
@@ -1399,9 +1467,9 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         var lastReportedZoomScale: CGFloat = 0
         var longPressedItem: LadderDrinkDisplayItem?
         var longPressStartContentPoint: CGPoint = .zero
-        var lastZoomInteractionAt = Date.distantPast
-        var lastLiveCounterUpdateAt = Date.distantPast
-        var lastLiveLabelUpdateAt = Date.distantPast
+        var lastZoomInteractionAt: TimeInterval = 0
+        var lastLiveCounterUpdateAt: TimeInterval = 0
+        var lastLiveLabelUpdateAt: TimeInterval = 0
         var lastReportedLabelScale: CGFloat = 0
         private let zoomGestureCooldown: TimeInterval = 0.3
         private let liveCounterUpdateInterval: TimeInterval = 1.0 / 30.0
@@ -1506,14 +1574,8 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         }
 
         private func hitSize(for entry: LadderDrinkEntry) -> CGSize {
-            let name = entry.item.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            let brand = entry.item.brand.trimmingCharacters(in: .whitespacesAndNewlines)
-            let displayName = name.isEmpty ? "未命名" : name
-            let displayBrand = brand.isEmpty ? "未知品牌" : brand
-            let longest = max(displayName.count, displayBrand.count)
-            let labelWidth = min(156, max(76, CGFloat(longest) * 10 + 24))
             let shouldIncludeLabel = entry.canShowLabel && zoomState.labelOpacity > 0.2
-            let baseWidth = shouldIncludeLabel ? labelWidth : 52
+            let baseWidth = shouldIncludeLabel ? entry.metrics.labelWidth : 52
             return CGSize(
                 width: baseWidth * zoomState.counterScale,
                 height: 64 * zoomState.counterScale
@@ -1558,32 +1620,33 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
             isZooming = true
-            lastZoomInteractionAt = Date()
-            lastLiveCounterUpdateAt = Date()
-            lastLiveLabelUpdateAt = Date()
+            let now = CACurrentMediaTime()
+            lastZoomInteractionAt = now
+            lastLiveCounterUpdateAt = now
+            lastLiveLabelUpdateAt = now
             lastReportedZoomScale = scrollView.zoomScale
             lastReportedLabelScale = scrollView.zoomScale
             zoomState.apply(scale: scrollView.zoomScale, publishesLabelOpacity: false)
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            lastZoomInteractionAt = Date()
-            updateLiveCounterScaleIfNeeded(for: scrollView.zoomScale)
-            updateLiveLabelOpacityIfNeeded(for: scrollView.zoomScale)
+            let now = CACurrentMediaTime()
+            lastZoomInteractionAt = now
+            updateLiveCounterScaleIfNeeded(for: scrollView.zoomScale, now: now)
+            updateLiveLabelOpacityIfNeeded(for: scrollView.zoomScale, now: now)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             isZooming = false
-            lastZoomInteractionAt = Date()
+            lastZoomInteractionAt = CACurrentMediaTime()
             zoomState.apply(scale: scale, publishesLabelOpacity: true)
             reportZoomScale(scale)
             lastReportedZoomScale = scale
             lastReportedLabelScale = scale
         }
 
-        private func updateLiveCounterScaleIfNeeded(for scale: CGFloat) {
-            let now = Date()
-            guard now.timeIntervalSince(lastLiveCounterUpdateAt) >= liveCounterUpdateInterval
+        private func updateLiveCounterScaleIfNeeded(for scale: CGFloat, now: TimeInterval) {
+            guard now - lastLiveCounterUpdateAt >= liveCounterUpdateInterval
                 || abs(scale - lastReportedZoomScale) >= liveCounterScaleStep else {
                 return
             }
@@ -1592,15 +1655,14 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             lastReportedZoomScale = scale
         }
 
-        private func updateLiveLabelOpacityIfNeeded(for scale: CGFloat) {
-            let now = Date()
+        private func updateLiveLabelOpacityIfNeeded(for scale: CGFloat, now: TimeInterval) {
             let previousProgress = CollectionView.labelRevealProgress(for: lastReportedLabelScale)
             let nextProgress = CollectionView.labelRevealProgress(for: scale)
             let crossedRevealBoundary = previousProgress == 0 && nextProgress > 0
                 || previousProgress < 1 && nextProgress == 1
                 || previousProgress > 0 && nextProgress == 0
             guard crossedRevealBoundary
-                || now.timeIntervalSince(lastLiveLabelUpdateAt) >= liveLabelUpdateInterval
+                || now - lastLiveLabelUpdateAt >= liveLabelUpdateInterval
                 || abs(scale - lastReportedLabelScale) >= liveLabelScaleStep else {
                 return
             }
@@ -1619,7 +1681,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
         private var canStartDrinkGesture: Bool {
             guard !isZooming else { return false }
-            guard Date().timeIntervalSince(lastZoomInteractionAt) > zoomGestureCooldown else { return false }
+            guard CACurrentMediaTime() - lastZoomInteractionAt > zoomGestureCooldown else { return false }
             guard let pinchState = scrollView?.pinchGestureRecognizer?.state else { return true }
             return pinchState == .possible || pinchState == .failed || pinchState == .cancelled
         }
@@ -1732,11 +1794,29 @@ private struct LadderMetrics {
     }
 }
 
+private struct LadderDrinkEntryMetrics {
+    let displayName: String
+    let displayBrand: String
+    let labelWidth: CGFloat
+    let accessibilityLabel: String
+
+    init(item: LadderDrinkDisplayItem) {
+        let name = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let brand = item.brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        displayName = name.isEmpty ? "未命名" : name
+        displayBrand = brand.isEmpty ? "未知品牌" : brand
+        let longest = max(displayName.count, displayBrand.count)
+        labelWidth = min(156, max(76, CGFloat(longest) * 10 + 24))
+        accessibilityLabel = "\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", item.rating))"
+    }
+}
+
 private struct LadderDrinkEntry: Identifiable {
     let item: LadderDrinkDisplayItem
     let position: CGPoint
     let side: LadderSide
     let canShowLabel: Bool
+    let metrics: LadderDrinkEntryMetrics
 
     var id: String {
         item.id
@@ -1788,13 +1868,12 @@ private struct LadderAxisView: View {
 }
 
 private struct LadderDrinkNode: View {
-    let item: LadderDrinkDisplayItem
-    let canShowLabel: Bool
+    let entry: LadderDrinkEntry
     @ObservedObject var zoomState: LadderZoomState
 
     var body: some View {
         VStack(spacing: 3) {
-            LadderStickerBadge(item: item)
+            LadderStickerBadge(item: entry.item)
                 .equatable()
 
             labelView
@@ -1805,20 +1884,20 @@ private struct LadderDrinkNode: View {
                     transaction.animation = nil
                 }
         }
-        .frame(width: labelWidth, height: 54, alignment: .top)
+        .frame(width: entry.metrics.labelWidth, height: 54, alignment: .top)
         .scaleEffect(zoomState.counterScale)
         .contentShape(Rectangle())
-        .accessibilityLabel("\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", item.rating))")
+        .accessibilityLabel(entry.metrics.accessibilityLabel)
     }
 
     private var labelView: some View {
         VStack(spacing: 1) {
-            Text(displayName)
+            Text(entry.metrics.displayName)
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
 
-            Text(displayBrand)
+            Text(entry.metrics.displayBrand)
                 .font(.system(size: 8))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -1828,30 +1907,15 @@ private struct LadderDrinkNode: View {
         .background(.white.opacity(0.9))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-        .frame(width: labelWidth)
-    }
-
-    private var displayName: String {
-        let cleaned = item.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "未命名" : cleaned
-    }
-
-    private var displayBrand: String {
-        let cleaned = item.brand.trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "未知品牌" : cleaned
-    }
-
-    private var labelWidth: CGFloat {
-        let longest = max(displayName.count, displayBrand.count)
-        return min(156, max(76, CGFloat(longest) * 10 + 24))
+        .frame(width: entry.metrics.labelWidth)
     }
 
     private var visibleLabelOpacity: CGFloat {
-        canShowLabel ? zoomState.labelOpacity : 0
+        entry.canShowLabel ? zoomState.labelOpacity : 0
     }
 
     private var renderedLabelOpacity: CGFloat {
-        canShowLabel ? max(0.003, visibleLabelOpacity) : 0
+        entry.canShowLabel ? max(0.003, visibleLabelOpacity) : 0
     }
 
 }

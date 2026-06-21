@@ -214,9 +214,14 @@ struct DrinkExportSnapshot: Sendable {
 final class SharedCompendiumStore: ObservableObject {
     @Published private(set) var compendiums: [SharedCompendium] = []
 
-    private static let manifestName = "manifest.json"
+    nonisolated private static let manifestName = "manifest.json"
     nonisolated static let packageVersion = 3
     nonisolated private static let minimumSupportedPackageVersion = 1
+    nonisolated private static let maxArchiveByteCount = 50 * 1024 * 1024
+    nonisolated private static let maxDrinkCount = 2_000
+    nonisolated private static let maxStickerByteCount = 2 * 1024 * 1024
+    nonisolated private static let maxTotalStickerByteCount = 80 * 1024 * 1024
+    nonisolated private static let maxStickerPixelDimension = 2_000
 
     nonisolated private static var rootDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -226,86 +231,122 @@ final class SharedCompendiumStore: ObservableObject {
     }
 
     init() {
-        load()
+        Task { await reload() }
+    }
+
+    func reload() async {
+        let compendiums = await Self.loadCompendiums()
+        self.compendiums = compendiums
     }
 
     func load() {
-        let root = Self.rootDirectory
+        compendiums = Self.loadCompendiumsSync()
+    }
+
+    nonisolated private static func loadCompendiums() async -> [SharedCompendium] {
+        await Task.detached(priority: .utility) {
+            loadCompendiumsSync()
+        }.value
+    }
+
+    nonisolated private static func loadCompendiumsSync() -> [SharedCompendium] {
+        let root = rootDirectory
         guard let ownerDirectories = try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) else {
-            compendiums = []
-            return
+            return []
         }
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        compendiums = ownerDirectories.compactMap { directory in
-            let manifestURL = directory.appendingPathComponent(Self.manifestName)
+        return ownerDirectories.compactMap { directory in
+            let manifestURL = directory.appendingPathComponent(manifestName)
             guard let data = try? Data(contentsOf: manifestURL) else { return nil }
             return try? decoder.decode(SharedCompendium.self, from: data)
         }
         .sorted { $0.exportedAt > $1.exportedAt }
     }
 
+    func importArchive(at url: URL) async throws -> SharedCompendium {
+        try Self.validateArchiveFileSize(at: url)
+        let compendium = try await Task.detached(priority: .userInitiated) {
+            let data = try Data(contentsOf: url)
+            return try Self.importArchiveDataSync(data)
+        }.value
+        await reload()
+        return compendium
+    }
+
     func importArchiveData(_ data: Data) throws -> SharedCompendium {
+        let compendium = try Self.importArchiveDataSync(data)
+        load()
+        return compendium
+    }
+
+    nonisolated private static func importArchiveDataSync(_ data: Data) throws -> SharedCompendium {
+        guard data.count <= maxArchiveByteCount else {
+            throw SharedCompendiumError.archiveTooLarge
+        }
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let archive = try decoder.decode(SharedCompendiumArchive.self, from: data)
-        guard archive.version >= Self.minimumSupportedPackageVersion,
-              archive.version <= Self.packageVersion else {
-            throw SharedCompendiumError.unsupportedVersion
-        }
+        try validate(archive: archive)
 
-        let ownerDirectory = Self.ownerDirectory(ownerID: archive.ownerID)
-        if FileManager.default.fileExists(atPath: ownerDirectory.path) {
-            try FileManager.default.removeItem(at: ownerDirectory)
-        }
-        try FileManager.default.createDirectory(at: ownerDirectory, withIntermediateDirectories: true)
+        let ownerDirectory = ownerDirectory(ownerID: archive.ownerID)
+        let temporaryDirectory = rootDirectory.appendingPathComponent(".import-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        do {
+            let drinks = try archive.drinks.map { archivedDrink in
+                var stickerFileName: String?
+                if let stickerData = archivedDrink.stickerData {
+                    let fileName = archivedDrink.id + "." + fileExtension(for: archivedDrink.stickerImageFormat)
+                    try stickerData.write(to: temporaryDirectory.appendingPathComponent(fileName), options: .atomic)
+                    stickerFileName = fileName
+                }
 
-        let drinks = try archive.drinks.map { archivedDrink in
-            var stickerFileName: String?
-            if let stickerData = archivedDrink.stickerData {
-                let fileName = archivedDrink.id + "." + Self.fileExtension(for: archivedDrink.stickerImageFormat)
-                try stickerData.write(to: ownerDirectory.appendingPathComponent(fileName), options: .atomic)
-                stickerFileName = fileName
+                return SharedDrink(
+                    id: archivedDrink.id,
+                    brand: archivedDrink.brand,
+                    name: archivedDrink.name,
+                    sweetness: archivedDrink.sweetness,
+                    iceLevel: archivedDrink.iceLevel,
+                    rating: archivedDrink.rating,
+                    consumedAt: archivedDrink.consumedAt,
+                    location: archivedDrink.location,
+                    note: archivedDrink.note,
+                    isLimited: archivedDrink.isLimited,
+                    cupCount: max(1, archivedDrink.cupCount),
+                    stickerFileName: stickerFileName,
+                    createdAt: archivedDrink.createdAt
+                )
             }
 
-            return SharedDrink(
-                id: archivedDrink.id,
-                brand: archivedDrink.brand,
-                name: archivedDrink.name,
-                sweetness: archivedDrink.sweetness,
-                iceLevel: archivedDrink.iceLevel,
-                rating: archivedDrink.rating,
-                consumedAt: archivedDrink.consumedAt,
-                location: archivedDrink.location,
-                note: archivedDrink.note,
-                isLimited: archivedDrink.isLimited,
-                cupCount: max(1, archivedDrink.cupCount),
-                stickerFileName: stickerFileName,
-                createdAt: archivedDrink.createdAt
+            let compendium = SharedCompendium(
+                ownerID: archive.ownerID,
+                ownerName: archive.ownerName,
+                exportedAt: archive.exportedAt,
+                drinks: drinks
             )
+
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let manifestData = try encoder.encode(compendium)
+            try manifestData.write(to: temporaryDirectory.appendingPathComponent(manifestName), options: .atomic)
+
+            if FileManager.default.fileExists(atPath: ownerDirectory.path) {
+                try FileManager.default.removeItem(at: ownerDirectory)
+            }
+            try FileManager.default.moveItem(at: temporaryDirectory, to: ownerDirectory)
+            return compendium
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryDirectory)
+            throw error
         }
-
-        let compendium = SharedCompendium(
-            ownerID: archive.ownerID,
-            ownerName: archive.ownerName,
-            exportedAt: archive.exportedAt,
-            drinks: drinks
-        )
-
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let manifestData = try encoder.encode(compendium)
-        try manifestData.write(to: ownerDirectory.appendingPathComponent(Self.manifestName), options: .atomic)
-
-        load()
-        return compendium
     }
 
     static func exportSnapshots(from drinks: [Drink]) -> [DrinkExportSnapshot] {
@@ -328,6 +369,9 @@ final class SharedCompendiumStore: ObservableObject {
     }
 
     static func exportArchiveData(from snapshots: [DrinkExportSnapshot], ownerName: String) async throws -> Data {
+        guard snapshots.count <= maxDrinkCount else {
+            throw SharedCompendiumError.tooManyDrinks
+        }
         let ownerID = localOwnerID
         return try await Task.detached(priority: .userInitiated) {
             let archive = SharedCompendiumArchive(
@@ -360,7 +404,11 @@ final class SharedCompendiumStore: ObservableObject {
 
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            return try encoder.encode(archive)
+            let data = try encoder.encode(archive)
+            guard data.count <= maxArchiveByteCount else {
+                throw SharedCompendiumError.archiveTooLarge
+            }
+            return data
         }.value
     }
 
@@ -404,6 +452,48 @@ final class SharedCompendiumStore: ObservableObject {
         return data as Data
     }
 
+    nonisolated private static func validateArchiveFileSize(at url: URL) throws {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        if let fileSize = values.fileSize, fileSize > maxArchiveByteCount {
+            throw SharedCompendiumError.archiveTooLarge
+        }
+    }
+
+    nonisolated private static func validate(archive: SharedCompendiumArchive) throws {
+        guard archive.version >= minimumSupportedPackageVersion,
+              archive.version <= packageVersion else {
+            throw SharedCompendiumError.unsupportedVersion
+        }
+        guard archive.drinks.count <= maxDrinkCount else {
+            throw SharedCompendiumError.tooManyDrinks
+        }
+
+        var seenDrinkIDs = Set<String>()
+        var totalStickerBytes = 0
+        for drink in archive.drinks {
+            guard seenDrinkIDs.insert(drink.id).inserted else {
+                throw SharedCompendiumError.invalidDrinkMetadata
+            }
+            if let stickerData = drink.stickerData {
+                guard stickerData.count <= maxStickerByteCount else {
+                    throw SharedCompendiumError.stickerTooLarge
+                }
+                totalStickerBytes += stickerData.count
+                guard totalStickerBytes <= maxTotalStickerByteCount else {
+                    throw SharedCompendiumError.stickerTooLarge
+                }
+            }
+            if let width = drink.stickerPixelWidth,
+               width > maxStickerPixelDimension {
+                throw SharedCompendiumError.invalidStickerMetadata
+            }
+            if let height = drink.stickerPixelHeight,
+               height > maxStickerPixelDimension {
+                throw SharedCompendiumError.invalidStickerMetadata
+            }
+        }
+    }
+
     nonisolated private static func fileExtension(for format: String?) -> String {
         switch format {
         case "webp":
@@ -444,11 +534,26 @@ private extension UIImage {
 
 enum SharedCompendiumError: LocalizedError {
     case unsupportedVersion
+    case archiveTooLarge
+    case tooManyDrinks
+    case stickerTooLarge
+    case invalidStickerMetadata
+    case invalidDrinkMetadata
 
     var errorDescription: String? {
         switch self {
         case .unsupportedVersion:
             "这个图鉴包版本暂时无法导入。"
+        case .archiveTooLarge:
+            "这个图鉴包太大，无法导入或分享。"
+        case .tooManyDrinks:
+            "这个图鉴包含的饮品太多，无法导入或分享。"
+        case .stickerTooLarge:
+            "这个图鉴包里的贴图太大，无法导入或分享。"
+        case .invalidStickerMetadata:
+            "这个图鉴包里的贴图信息异常，无法导入。"
+        case .invalidDrinkMetadata:
+            "这个图鉴包里的饮品信息异常，无法导入。"
         }
     }
 }

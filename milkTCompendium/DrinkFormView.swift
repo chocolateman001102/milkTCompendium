@@ -325,13 +325,15 @@ struct DrinkFormView: View {
 
     @MainActor
     private func process(_ image: UIImage) async {
-        let displayImage = image.preparedForDrinkForm()
-        originalImage = displayImage
         stickerImage = nil
         isProcessing = true
         defer { isProcessing = false }
 
         do {
+            let displayImage = await Task.detached(priority: .userInitiated) {
+                image.preparedForDrinkForm()
+            }.value
+            originalImage = displayImage
             let processed = try await DrinkImageProcessor.process(displayImage)
             didChangeImage = true
             stickerImage = processed.sticker
@@ -352,12 +354,16 @@ struct DrinkFormView: View {
     private func saveAsNew() {
         let cleanedBrand = brand.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var newOriginalName: String?
+        var newStickerName: String?
         do {
             switch mode {
             case .create:
                 guard let originalImage, let stickerImage else { return }
                 let originalName = try ImageStore.saveOriginal(originalImage)
                 let stickerName = try ImageStore.saveSticker(stickerImage)
+                newOriginalName = originalName
+                newStickerName = stickerName
                 let drink = Drink(
                     brand: cleanedBrand,
                     name: cleanedName,
@@ -386,16 +392,31 @@ struct DrinkFormView: View {
                 drink.isLimited = isLimited
                 drink.cupCount = max(1, cupCount)
 
+                var oldOriginalName: String?
+                var oldStickerName: String?
                 if didChangeImage, let originalImage, let stickerImage {
-                    drink.originalImageName = try ImageStore.saveOriginal(originalImage)
-                    drink.stickerImageName = try ImageStore.saveSticker(stickerImage)
+                    oldOriginalName = drink.originalImageName
+                    oldStickerName = drink.stickerImageName
+                    let originalName = try ImageStore.saveOriginal(originalImage)
+                    let stickerName = try ImageStore.saveSticker(stickerImage)
+                    newOriginalName = originalName
+                    newStickerName = stickerName
+                    drink.originalImageName = originalName
+                    drink.stickerImageName = stickerName
                 }
+                try modelContext.save()
+                ImageStore.delete(oldOriginalName)
+                ImageStore.delete(oldStickerName)
             }
-            try modelContext.save()
+            if case .create = mode {
+                try modelContext.save()
+            }
             BrandStore.remember(cleanedBrand)
             onSaved()
             dismiss()
         } catch {
+            ImageStore.delete(newOriginalName)
+            ImageStore.delete(newStickerName)
             errorMessage = error.localizedDescription
         }
     }

@@ -108,18 +108,19 @@ struct ContentView: View {
     }
 
     private func importSharedCompendium(from url: URL) {
-        let didAccess = url.startAccessingSecurityScopedResource()
-        defer {
-            if didAccess {
-                url.stopAccessingSecurityScopedResource()
+        Task {
+            let didAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if didAccess {
+                    url.stopAccessingSecurityScopedResource()
+                }
             }
-        }
 
-        do {
-            let data = try Data(contentsOf: url)
-            _ = try sharedStore.importArchiveData(data)
-        } catch {
-            cameraErrorMessage = error.localizedDescription
+            do {
+                _ = try await sharedStore.importArchive(at: url)
+            } catch {
+                cameraErrorMessage = error.localizedDescription
+            }
         }
     }
 

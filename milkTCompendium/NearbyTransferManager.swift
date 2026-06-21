@@ -145,6 +145,8 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     private var pendingResourceURL: URL?
     private var pendingPeerID: MCPeerID?
     private var pendingRequestPeerID: MCPeerID?
+    private var activeSendPeerID: MCPeerID?
+    private var activeSendTask: Task<Void, Never>?
     private var sendTimeoutID: UUID?
 
     init(summary: NearbyLocalSummary) {
@@ -174,6 +176,9 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        activeSendTask?.cancel()
+        activeSendTask = nil
+        activeSendPeerID = nil
         sendTimeoutID = nil
         browser.stopBrowsingForPeers()
         advertiser.stopAdvertisingPeer()
@@ -231,6 +236,11 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         if session.connectedPeers.contains(peer.peerID) {
             session.disconnect()
         }
+        if activeSendPeerID == peer.peerID {
+            activeSendTask?.cancel()
+            activeSendTask = nil
+            activeSendPeerID = nil
+        }
         sendTimeoutID = nil
         pendingPeerID = nil
         pendingRequestPeerID = nil
@@ -239,6 +249,9 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func failPendingSend(_ message: String) {
+        activeSendTask?.cancel()
+        activeSendTask = nil
+        activeSendPeerID = nil
         isSending = false
         if let pendingResourceURL {
             try? FileManager.default.removeItem(at: pendingResourceURL)
@@ -262,14 +275,23 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             failPendingSend("没有可发送的档案数据")
             return
         }
+        if let activeSendPeerID {
+            if activeSendPeerID == peerID {
+                return
+            }
+            statusMessage = "正在发送档案，请稍后再试"
+            return
+        }
 
+        activeSendPeerID = peerID
         isSending = true
         statusMessage = "正在打包档案"
-        Task {
+        activeSendTask = Task {
             do {
                 let data = try await makePackageData()
                 try Task.checkCancellation()
                 let url = try await Self.writeTemporaryPackage(data)
+                try Task.checkCancellation()
                 await MainActor.run {
                     self.pendingResourceURL = url
                     self.pendingPeerID = peerID
@@ -302,6 +324,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         guard let url = pendingResourceURL,
               let peerID = pendingPeerID,
               session.connectedPeers.contains(peerID) else {
+            failPendingSend("发送失败：连接已断开")
             return
         }
 
@@ -310,6 +333,8 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 let sentPeer = self.peers.first { $0.peerID == peerID }
+                self.activeSendTask = nil
+                self.activeSendPeerID = nil
                 self.isSending = false
                 self.pendingResourceURL = nil
                 self.pendingPeerID = nil

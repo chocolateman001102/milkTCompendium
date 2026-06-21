@@ -479,21 +479,22 @@ private struct NearbyTransferSessionView: View {
     }
 
     private func importPackage(at url: URL) {
-        do {
-            let data = try Data(contentsOf: url)
-            let compendium = try sharedStore.importArchiveData(data)
-            let profile = TasteScoreCalculator.profile(from: compendium)
-            tasteStatsStore.recordSuccessfulExchange(
-                ownerID: compendium.ownerID,
-                ownerName: compendium.ownerName,
-                drinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
-                averageRating: TasteScoreCalculator.averageRating(profile: profile),
-                profile: profile
-            )
-            onImported(compendium)
-            message = "已导入 \(compendium.ownerName) 的档案"
-        } catch {
-            message = error.localizedDescription
+        Task {
+            do {
+                let compendium = try await sharedStore.importArchive(at: url)
+                let profile = TasteScoreCalculator.profile(from: compendium)
+                tasteStatsStore.recordSuccessfulExchange(
+                    ownerID: compendium.ownerID,
+                    ownerName: compendium.ownerName,
+                    drinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
+                    averageRating: TasteScoreCalculator.averageRating(profile: profile),
+                    profile: profile
+                )
+                onImported(compendium)
+                message = "已导入 \(compendium.ownerName) 的档案"
+            } catch {
+                message = error.localizedDescription
+            }
         }
     }
 
