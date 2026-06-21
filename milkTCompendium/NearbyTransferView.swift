@@ -7,7 +7,6 @@ struct NearbyTransferView: View {
     let onImported: (SharedCompendium) -> Void
 
     @AppStorage("NearbyTransferDisplayName") private var savedDisplayName = NearbyDisplayNameStore.displayName
-    @State private var draftDisplayName = NearbyDisplayNameStore.displayName
 
     var body: some View {
         NearbyTransferSessionView(
@@ -15,12 +14,10 @@ struct NearbyTransferView: View {
             sharedStore: sharedStore,
             tasteStatsStore: tasteStatsStore,
             displayName: NearbyDisplayNameStore.cleanDisplayName(savedDisplayName),
-            draftDisplayName: $draftDisplayName,
             onSaveDisplayName: { name in
                 let cleaned = NearbyDisplayNameStore.cleanDisplayName(name)
                 NearbyDisplayNameStore.displayName = cleaned
                 savedDisplayName = cleaned
-                draftDisplayName = cleaned
             },
             onImported: onImported
         )
@@ -41,24 +38,22 @@ private struct NearbyTransferSessionView: View {
     let sharedStore: SharedCompendiumStore
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
     let displayName: String
-    @Binding var draftDisplayName: String
     let onSaveDisplayName: (String) -> Void
     let onImported: (SharedCompendium) -> Void
 
     @StateObject private var manager: NearbyTransferManager
     @State private var message: String?
-    @State private var sharePackage: SharePackage?
     @State private var selectedPeer: NearbyPeer?
     @State private var searchText = ""
     @State private var filter: PeerFilter = .all
     @State private var showingDisplayNameEditor = false
+    @State private var showingTemporaryLocalImport = false
 
     init(
         drinks: [Drink],
         sharedStore: SharedCompendiumStore,
         tasteStatsStore: TasteExchangeStatsStore,
         displayName: String,
-        draftDisplayName: Binding<String>,
         onSaveDisplayName: @escaping (String) -> Void,
         onImported: @escaping (SharedCompendium) -> Void
     ) {
@@ -66,7 +61,6 @@ private struct NearbyTransferSessionView: View {
         self.sharedStore = sharedStore
         self.tasteStatsStore = tasteStatsStore
         self.displayName = displayName
-        _draftDisplayName = draftDisplayName
         self.onSaveDisplayName = onSaveDisplayName
         self.onImported = onImported
         _manager = StateObject(wrappedValue: NearbyTransferManager(summary: Self.summary(for: drinks, displayName: displayName)))
@@ -90,15 +84,15 @@ private struct NearbyTransferSessionView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
-                            shareWithSystemSheet()
-                        } label: {
-                            Label("AirDrop/系统分享", systemImage: "square.and.arrow.up")
-                        }
-
-                        Button {
                             showingDisplayNameEditor = true
                         } label: {
                             Label("修改档案名", systemImage: "person.text.rectangle")
+                        }
+
+                        Button {
+                            showingTemporaryLocalImport = true
+                        } label: {
+                            Label("临时导入到本地图鉴", systemImage: "square.and.arrow.down")
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
@@ -106,9 +100,7 @@ private struct NearbyTransferSessionView: View {
                 }
             }
             .onAppear {
-                draftDisplayName = manager.localDisplayName
                 manager.onReceivedPackage = importPackage(at:)
-                manager.onSentPackage = recordSentPackage(to:)
                 manager.makePackageData = makePackageData
                 manager.start()
             }
@@ -126,7 +118,7 @@ private struct NearbyTransferSessionView: View {
             .alert(item: $manager.pendingInvitation) { invitation in
                 Alert(
                     title: Text(invitation.mode.title),
-                    message: Text(invitation.mode == .receivingCompendium ? "\(invitation.peerName) 想发送档案给你" : "\(invitation.peerName) 想查看你的档案"),
+                    message: Text("\(invitation.peerName) 想和你交换档案"),
                     primaryButton: .default(Text("同意")) {
                         manager.acceptInvitation()
                     },
@@ -139,12 +131,8 @@ private struct NearbyTransferSessionView: View {
                 PeerExchangePanel(
                     peer: peer,
                     isImported: isImported(peer),
-                    onSend: {
-                        manager.sendMine(to: peer)
-                        selectedPeer = nil
-                    },
-                    onRequest: {
-                        manager.requestCompendium(from: peer)
+                    onExchange: {
+                        manager.exchange(with: peer)
                         selectedPeer = nil
                     },
                     onDisconnect: {
@@ -152,21 +140,22 @@ private struct NearbyTransferSessionView: View {
                         selectedPeer = nil
                     }
                 )
-                .presentationDetents([.height(310)])
-            }
-            .sheet(item: $sharePackage) { package in
-                ActivityShareView(items: [package.url])
-                    .ignoresSafeArea()
+                .presentationDetents([.height(250)])
             }
             .sheet(isPresented: $showingDisplayNameEditor) {
                 DisplayNameEditor(
-                    draftDisplayName: $draftDisplayName,
+                    initialDisplayName: manager.localDisplayName,
                     onSave: { name in
-                        onSaveDisplayName(name)
                         showingDisplayNameEditor = false
+                        DispatchQueue.main.async {
+                            onSaveDisplayName(name)
+                        }
                     }
                 )
                 .presentationDetents([.height(230)])
+            }
+            .sheet(isPresented: $showingTemporaryLocalImport) {
+                TemporaryLocalArchiveImportView()
             }
         }
     }
@@ -194,8 +183,9 @@ private struct NearbyTransferSessionView: View {
                 summaryPill(value: "\(profileCupCount)", label: "总杯")
                 summaryPill(value: "\(drinks.count)", label: "收集")
                 summaryPill(value: String(format: "%.2f", averageRating), label: "均分")
-                summaryPill(value: "\(tasteStatsStore.stats.peers.count)", label: "交换")
+                summaryPill(value: "\(tasteStatsStore.stats.successfulExchangeCount)", label: "交换")
             }
+            friendCupPill
 
             VStack(alignment: .leading, spacing: 9) {
                 Text("前三品牌")
@@ -273,19 +263,59 @@ private struct NearbyTransferSessionView: View {
         )
     }
 
-    private var statusCard: some View {
+    private var friendCupPill: some View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(manager.isSending ? Color.orange.opacity(0.18) : Color.green.opacity(0.16))
-                Image(systemName: manager.isSending ? "shippingbox.fill" : "dot.radiowaves.left.and.right")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(manager.isSending ? .orange : .green)
+                    .fill(Color.blue.opacity(0.12))
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.blue)
             }
             .frame(width: 42, height: 42)
 
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(totalCupCountWithFriends)")
+                    .font(.title3.weight(.black).monospacedDigit())
+                Text("和朋友的总杯数")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text("朋友 \(friendsCupCount)")
+                .font(.caption.weight(.bold).monospacedDigit())
+                .foregroundStyle(.blue)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.1))
+                .clipShape(Capsule())
+        }
+        .padding(12)
+        .background(Color.blue.opacity(0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.blue.opacity(0.16), lineWidth: 1)
+        )
+    }
+
+    private var statusCard: some View {
+        let isActive = manager.isSending
+        return HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isActive ? Color.orange.opacity(0.22) : Color.green.opacity(0.16))
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: isActive ? 22 : 18, weight: .bold))
+                    .foregroundStyle(isActive ? .orange : .green)
+            }
+            .frame(width: 42, height: 42)
+            .shadow(color: isActive ? Color.orange.opacity(0.36) : .clear, radius: 14, y: 4)
+
             VStack(alignment: .leading, spacing: 3) {
-                Text(manager.isSending ? "传输中" : "交换雷达")
+                Text("交换雷达")
                     .font(.subheadline.weight(.black))
                 Text(manager.statusMessage)
                     .font(.caption)
@@ -295,8 +325,9 @@ private struct NearbyTransferSessionView: View {
 
             Spacer()
 
-            if manager.isSending || manager.peers.isEmpty {
+            if isActive || manager.peers.isEmpty {
                 ProgressView()
+                    .tint(isActive ? .orange : .secondary)
             } else {
                 Text("\(manager.peers.count)")
                     .font(.headline.weight(.black).monospacedDigit())
@@ -308,12 +339,13 @@ private struct NearbyTransferSessionView: View {
             }
         }
         .padding(14)
-        .background(.white)
+        .background(isActive ? Color.orange.opacity(0.08) : .white)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(.black.opacity(0.07), lineWidth: 1)
+                .stroke(isActive ? Color.orange.opacity(0.42) : Color.black.opacity(0.07), lineWidth: isActive ? 1.5 : 1)
         )
+        .shadow(color: isActive ? Color.orange.opacity(0.18) : .clear, radius: 20, y: 8)
     }
 
     private var controls: some View {
@@ -387,6 +419,14 @@ private struct NearbyTransferSessionView: View {
         TasteScoreCalculator.effectiveCupCount(drinks: drinks)
     }
 
+    private var friendsCupCount: Int {
+        tasteStatsStore.stats.peers.map(\.drinkCount).reduce(0, +)
+    }
+
+    private var totalCupCountWithFriends: Int {
+        profileCupCount + friendsCupCount
+    }
+
     private var tasteScore: TasteScoreResult {
         TasteScoreCalculator.calculate(localDrinks: drinks, stats: tasteStatsStore.stats)
     }
@@ -446,38 +486,6 @@ private struct NearbyTransferSessionView: View {
         )
     }
 
-    private func shareWithSystemSheet() {
-        manager.prepareToShare()
-        Task {
-            do {
-                let data = try await makePackageData()
-                let url = try await writeSharePackage(data: data, ownerName: manager.localDisplayName)
-                await MainActor.run {
-                    manager.finishPreparingShare()
-                    sharePackage = SharePackage(url: url)
-                }
-            } catch {
-                await MainActor.run {
-                    manager.failPendingSend("分享失败：\(error.localizedDescription)")
-                    message = error.localizedDescription
-                }
-            }
-        }
-    }
-
-    private func writeSharePackage(data: Data, ownerName: String) async throws -> URL {
-        try await Task.detached(priority: .userInitiated) {
-            let safeName = ownerName
-                .replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: ":", with: "-")
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("\(safeName)-奶茶图鉴")
-                .appendingPathExtension("mtcpack")
-            try data.write(to: url, options: .atomic)
-            return url
-        }.value
-    }
-
     private func importPackage(at url: URL) {
         Task {
             do {
@@ -496,15 +504,6 @@ private struct NearbyTransferSessionView: View {
                 message = error.localizedDescription
             }
         }
-    }
-
-    private func recordSentPackage(to peer: NearbyPeer) {
-        tasteStatsStore.recordSuccessfulExchange(
-            ownerID: peer.stableID,
-            ownerName: peer.name,
-            drinkCount: peer.effectiveDrinkCount,
-            averageRating: peer.averageRating
-        )
     }
 
     private static func summary(for drinks: [Drink], displayName: String) -> NearbyLocalSummary {
@@ -566,9 +565,14 @@ private struct FavoriteBrandRow: View {
 }
 
 private struct DisplayNameEditor: View {
-    @Binding var draftDisplayName: String
+    @State private var draftDisplayName: String
     let onSave: (String) -> Void
     @Environment(\.dismiss) private var dismiss
+
+    init(initialDisplayName: String, onSave: @escaping (String) -> Void) {
+        _draftDisplayName = State(initialValue: initialDisplayName)
+        self.onSave = onSave
+    }
 
     var body: some View {
         NavigationStack {
@@ -670,8 +674,7 @@ private struct PeerCard: View {
 private struct PeerExchangePanel: View {
     let peer: NearbyPeer
     let isImported: Bool
-    let onSend: () -> Void
-    let onRequest: () -> Void
+    let onExchange: () -> Void
     let onDisconnect: () -> Void
 
     var body: some View {
@@ -689,18 +692,11 @@ private struct PeerExchangePanel: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button(action: onSend) {
-                Label("发送我的档案", systemImage: "arrow.up.circle.fill")
+            Button(action: onExchange) {
+                Label("交换档案", systemImage: "arrow.triangle.2.circlepath.circle.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-
-            Button(action: onRequest) {
-                Label("请求对方档案", systemImage: "arrow.down.circle")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
             .controlSize(.large)
 
             Button("断开连接", role: .destructive, action: onDisconnect)
@@ -708,19 +704,4 @@ private struct PeerExchangePanel: View {
         }
         .padding(22)
     }
-}
-
-private struct SharePackage: Identifiable {
-    let id = UUID()
-    let url: URL
-}
-
-private struct ActivityShareView: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

@@ -24,6 +24,7 @@
 		A10000000000000000000011 /* NearbyTransferManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* NearbyTransferManager.swift */; };
 		A10000000000000000000012 /* NearbyTransferView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* NearbyTransferView.swift */; };
 		A10000000000000000000015 /* TasteScore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* TasteScore.swift */; };
+		A10000000000000000000016 /* TemporaryLocalArchiveImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* TemporaryLocalArchiveImporter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		A20000000000000000000012 /* NearbyTransferView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyTransferView.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000000000000000000015 /* TasteScore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TasteScore.swift; sourceTree = "<group>"; };
+		A20000000000000000000016 /* TemporaryLocalArchiveImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TemporaryLocalArchiveImporter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -85,6 +87,7 @@
 				A20000000000000000000011 /* NearbyTransferManager.swift */,
 				A20000000000000000000012 /* NearbyTransferView.swift */,
 				A20000000000000000000015 /* TasteScore.swift */,
+				A20000000000000000000016 /* TemporaryLocalArchiveImporter.swift */,
 				A2000000000000000000000A /* CameraPicker.swift */,
 				A20000000000000000000013 /* Info.plist */,
 				A2000000000000000000000B /* Assets.xcassets */,
@@ -186,6 +189,7 @@
 				A10000000000000000000011 /* NearbyTransferManager.swift in Sources */,
 				A10000000000000000000012 /* NearbyTransferView.swift in Sources */,
 				A10000000000000000000015 /* TasteScore.swift in Sources */,
+				A10000000000000000000016 /* TemporaryLocalArchiveImporter.swift in Sources */,
 				A1000000000000000000000A /* CameraPicker.swift in Sources */,
 				A1000000000000000000000D /* BrandStore.swift in Sources */,
 			);
@@ -232,7 +236,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = D5G57ZMV9C;
+				DEVELOPMENT_TEAM = 4LSX9UPU9C;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = milkTCompendium/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -241,7 +245,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yangchen.milkTCompendium;
+				PRODUCT_BUNDLE_IDENTIFIER = com.choco.milkTCompendium;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;
@@ -257,7 +261,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = D5G57ZMV9C;
+				DEVELOPMENT_TEAM = 4LSX9UPU9C;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = milkTCompendium/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -266,7 +270,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.yangchen.milkTCompendium;
+				PRODUCT_BUNDLE_IDENTIFIER = com.choco.milkTCompendium;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = NO;

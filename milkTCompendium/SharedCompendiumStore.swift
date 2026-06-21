@@ -286,7 +286,7 @@ final class SharedCompendiumStore: ObservableObject {
         return compendium
     }
 
-    nonisolated private static func importArchiveDataSync(_ data: Data) throws -> SharedCompendium {
+    nonisolated static func decodeArchiveData(_ data: Data) throws -> SharedCompendiumArchive {
         guard data.count <= maxArchiveByteCount else {
             throw SharedCompendiumError.archiveTooLarge
         }
@@ -295,6 +295,11 @@ final class SharedCompendiumStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         let archive = try decoder.decode(SharedCompendiumArchive.self, from: data)
         try validate(archive: archive)
+        return archive
+    }
+
+    nonisolated private static func importArchiveDataSync(_ data: Data) throws -> SharedCompendium {
+        let archive = try decodeArchiveData(data)
 
         let ownerDirectory = ownerDirectory(ownerID: archive.ownerID)
         let temporaryDirectory = rootDirectory.appendingPathComponent(".import-\(UUID().uuidString)", isDirectory: true)
@@ -503,6 +508,10 @@ final class SharedCompendiumStore: ObservableObject {
         default:
             return "png"
         }
+    }
+
+    nonisolated static func stickerFileExtension(for format: String?) -> String {
+        fileExtension(for: format)
     }
 
     static var localOwnerID: String {

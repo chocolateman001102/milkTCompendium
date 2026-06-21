@@ -624,6 +624,13 @@ struct CollectionView: View {
                 String(format: "%.3f", item.rating),
                 item.brand,
                 item.name,
+                item.sweetness,
+                item.iceLevel,
+                String(format: "%.3f", item.consumedAt.timeIntervalSince1970),
+                item.location,
+                item.note,
+                item.isLimited ? "1" : "0",
+                "\(item.cupCount)",
                 item.stickerImageName ?? item.stickerFileURL?.lastPathComponent ?? "",
                 String(format: "%.3f", item.createdAt.timeIntervalSince1970)
             ].joined(separator: "#")

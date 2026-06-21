@@ -43,15 +43,12 @@ struct NearbyLocalSummary {
 
 struct NearbyInvitation: Identifiable {
     enum Mode {
-        case receivingCompendium
-        case sharingMine
+        case exchangingCompendium
 
         var title: String {
             switch self {
-            case .receivingCompendium:
-                return "接收档案"
-            case .sharingMine:
-                return "发送档案"
+            case .exchangingCompendium:
+                return "交换档案"
             }
         }
     }
@@ -65,6 +62,7 @@ private struct NearbyInviteContext: Codable {
     enum Action: String, Codable {
         case sendCompendium
         case requestCompendium
+        case exchangeCompendium
     }
 
     let action: Action
@@ -73,6 +71,7 @@ private struct NearbyInviteContext: Codable {
 private struct NearbyControlMessage: Codable {
     enum Action: String, Codable {
         case requestCompendium
+        case exchangeCompendium
     }
 
     let action: Action
@@ -132,7 +131,6 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     @Published var pendingInvitation: NearbyInvitation?
 
     var onReceivedPackage: ((URL) -> Void)?
-    var onSentPackage: ((NearbyPeer) -> Void)?
     var makePackageData: (() async throws -> Data)?
 
     private static let serviceType = "mtc-share"
@@ -144,7 +142,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     private var pendingInvitationHandler: ((Bool, MCSession?) -> Void)?
     private var pendingResourceURL: URL?
     private var pendingPeerID: MCPeerID?
-    private var pendingRequestPeerID: MCPeerID?
+    private var pendingExchangePeerID: MCPeerID?
     private var activeSendPeerID: MCPeerID?
     private var activeSendTask: Task<Void, Never>?
     private var sendTimeoutID: UUID?
@@ -185,50 +183,30 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         session.disconnect()
     }
 
-    func prepareToShare() {
+    func exchange(with peer: NearbyPeer) {
+        statusMessage = "正在连接 \(peer.name) 交换档案"
         isSending = true
-        statusMessage = "正在准备档案文件"
-    }
-
-    func finishPreparingShare() {
-        isSending = false
-        statusMessage = "档案文件已准备好"
-    }
-
-    func sendMine(to peer: NearbyPeer) {
-        statusMessage = "正在连接 \(peer.name)"
-        isSending = true
-        pendingPeerID = peer.peerID
+        pendingExchangePeerID = peer.peerID
         if session.connectedPeers.contains(peer.peerID) {
+            guard sendExchangeMessage(to: peer.peerID) else { return }
             prepareAndSendPackage(to: peer.peerID)
             return
         }
-        invite(peer, action: .sendCompendium)
-    }
-
-    func requestCompendium(from peer: NearbyPeer) {
-        statusMessage = "正在请求 \(peer.name) 的档案"
-        isSending = true
-        pendingRequestPeerID = peer.peerID
-        if session.connectedPeers.contains(peer.peerID) {
-            sendRequestMessage(to: peer.peerID)
-            scheduleSendTimeout(for: peer)
-            return
-        }
-        invite(peer, action: .requestCompendium)
+        invite(peer, action: .exchangeCompendium)
     }
 
     func acceptInvitation() {
         pendingInvitationHandler?(true, session)
         pendingInvitationHandler = nil
         pendingInvitation = nil
-        statusMessage = "正在建立连接"
+        statusMessage = "正在建立交换连接"
     }
 
     func declineInvitation() {
         pendingInvitationHandler?(false, nil)
         pendingInvitationHandler = nil
         pendingInvitation = nil
+        pendingExchangePeerID = nil
         statusMessage = "已拒绝邀请"
     }
 
@@ -243,7 +221,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         }
         sendTimeoutID = nil
         pendingPeerID = nil
-        pendingRequestPeerID = nil
+        pendingExchangePeerID = nil
         isSending = false
         statusMessage = "已断开 \(peer.name)"
     }
@@ -259,7 +237,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         sendTimeoutID = nil
         pendingResourceURL = nil
         pendingPeerID = nil
-        pendingRequestPeerID = nil
+        pendingExchangePeerID = nil
         statusMessage = message
     }
 
@@ -279,7 +257,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             if activeSendPeerID == peerID {
                 return
             }
-            statusMessage = "正在发送档案，请稍后再试"
+            statusMessage = "正在交换档案，请稍后再试"
             return
         }
 
@@ -328,37 +306,35 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             return
         }
 
-        statusMessage = "正在发送档案"
+        statusMessage = "正在交换档案"
         session.sendResource(at: url, withName: url.lastPathComponent, toPeer: peerID) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                let sentPeer = self.peers.first { $0.peerID == peerID }
                 self.activeSendTask = nil
                 self.activeSendPeerID = nil
-                self.isSending = false
+                self.isSending = self.pendingExchangePeerID == peerID
                 self.pendingResourceURL = nil
                 self.pendingPeerID = nil
                 try? FileManager.default.removeItem(at: url)
                 if let error {
                     self.statusMessage = "发送失败：\(error.localizedDescription)"
                 } else {
-                    if let sentPeer {
-                        self.onSentPackage?(sentPeer)
-                    }
-                    self.statusMessage = "已发送"
+                    self.statusMessage = "已送出，等待对方档案"
                 }
             }
         }
     }
 
-    private func sendRequestMessage(to peerID: MCPeerID) {
-        let message = NearbyControlMessage(action: .requestCompendium)
-        guard let data = try? JSONEncoder().encode(message) else { return }
+    private func sendExchangeMessage(to peerID: MCPeerID) -> Bool {
+        let message = NearbyControlMessage(action: .exchangeCompendium)
+        guard let data = try? JSONEncoder().encode(message) else { return false }
         do {
             try session.send(data, toPeers: [peerID], with: .reliable)
-            statusMessage = "已请求对方档案"
+            statusMessage = "已发起交换"
+            return true
         } catch {
-            failPendingSend("请求失败：\(error.localizedDescription)")
+            failPendingSend("交换失败：\(error.localizedDescription)")
+            return false
         }
     }
 
@@ -374,7 +350,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
             guard let self,
                   self.sendTimeoutID == timeoutID,
-                  self.pendingPeerID == peer.peerID || self.pendingRequestPeerID == peer.peerID,
+                  self.pendingPeerID == peer.peerID || self.pendingExchangePeerID == peer.peerID,
                   !self.session.connectedPeers.contains(peer.peerID) else {
                 return
             }
@@ -429,10 +405,16 @@ extension NearbyTransferManager: MCNearbyServiceAdvertiserDelegate {
     ) {
         DispatchQueue.main.async {
             let invite = context.flatMap { try? JSONDecoder().decode(NearbyInviteContext.self, from: $0) }
-            let mode: NearbyInvitation.Mode = invite?.action == .requestCompendium ? .sharingMine : .receivingCompendium
+            guard invite?.action == .exchangeCompendium else {
+                invitationHandler(false, nil)
+                self.statusMessage = "\(peerID.displayName) 使用了旧版单向传输，请双方都更新后再交换"
+                return
+            }
+            let mode: NearbyInvitation.Mode = .exchangingCompendium
             self.pendingInvitationHandler = invitationHandler
+            self.pendingExchangePeerID = peerID
             self.pendingInvitation = NearbyInvitation(peerName: peerID.displayName, mode: mode)
-            self.statusMessage = "收到 \(peerID.displayName) 的邀请"
+            self.statusMessage = "收到 \(peerID.displayName) 的交换邀请"
         }
     }
 }
@@ -443,15 +425,13 @@ extension NearbyTransferManager: MCSessionDelegate {
             switch state {
             case .connected:
                 self.statusMessage = "已连接 \(peerID.displayName)"
-                if self.pendingPeerID == peerID {
+                if self.pendingExchangePeerID == peerID || self.pendingPeerID == peerID {
                     self.prepareAndSendPackage(to: peerID)
-                } else if self.pendingRequestPeerID == peerID {
-                    self.sendRequestMessage(to: peerID)
                 }
             case .connecting:
                 self.statusMessage = "正在连接 \(peerID.displayName)"
             case .notConnected:
-                if self.pendingPeerID == peerID || self.pendingRequestPeerID == peerID {
+                if self.pendingPeerID == peerID || self.pendingExchangePeerID == peerID {
                     self.failPendingSend("\(peerID.displayName) 已断开")
                 } else {
                     self.statusMessage = "\(peerID.displayName) 已断开"
@@ -480,16 +460,17 @@ extension NearbyTransferManager: MCSessionDelegate {
             }
             self.isSending = false
             self.sendTimeoutID = nil
-            self.pendingRequestPeerID = nil
-            self.statusMessage = "已收到 \(peerID.displayName) 的档案"
+            self.pendingExchangePeerID = nil
+            self.statusMessage = "已完成与 \(peerID.displayName) 的交换"
             self.onReceivedPackage?(localURL)
         }
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
         guard let message = try? JSONDecoder().decode(NearbyControlMessage.self, from: data),
-              message.action == .requestCompendium else { return }
+              message.action == .exchangeCompendium else { return }
         DispatchQueue.main.async {
+            self.pendingExchangePeerID = peerID
             self.prepareAndSendPackage(to: peerID)
         }
     }
@@ -502,6 +483,9 @@ extension NearbyTransferManager: MCSessionDelegate {
         fromPeer peerID: MCPeerID,
         with progress: Progress
     ) {
-        updateStatus("正在接收 \(peerID.displayName) 的档案")
+        DispatchQueue.main.async {
+            self.isSending = true
+            self.statusMessage = "正在接收 \(peerID.displayName) 的档案"
+        }
     }
 }

@@ -40,6 +40,14 @@ enum ImageStore {
         return name
     }
 
+    static func saveStickerData(_ data: Data, preferredExtension: String) throws -> String {
+        let cleanExtension = preferredExtension
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".").union(.whitespacesAndNewlines))
+        let name = UUID().uuidString + "." + (cleanExtension.isEmpty ? "png" : cleanExtension)
+        try data.write(to: directory.appendingPathComponent(name), options: .atomic)
+        return name
+    }
+
     static func load(_ name: String?) -> UIImage? {
         guard let name else { return nil }
         let key = name as NSString
