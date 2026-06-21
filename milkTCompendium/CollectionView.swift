@@ -3,6 +3,29 @@ import SwiftData
 import SwiftUI
 import UIKit
 
+private struct CollectionDerivedData {
+    var displayItems: [LadderDrinkDisplayItem]
+    var filteredItems: [LadderDrinkDisplayItem]
+    var sortedItems: [LadderDrinkDisplayItem]
+    var brandOptions: [String]
+}
+
+private final class CollectionDerivedDataCache: ObservableObject {
+    private var cachedKey: String?
+    private var cachedData: CollectionDerivedData?
+
+    func snapshot(for key: String, build: () -> CollectionDerivedData) -> CollectionDerivedData {
+        if cachedKey == key, let cachedData {
+            return cachedData
+        }
+
+        let data = build()
+        cachedKey = key
+        cachedData = data
+        return data
+    }
+}
+
 struct CollectionView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Drink.createdAt, order: .reverse) private var drinks: [Drink]
@@ -20,8 +43,8 @@ struct CollectionView: View {
     @State private var selectedBrandFilter: String?
     @State private var selectedRatingBand: LadderRatingBand = .all
     @State private var isFilterPanelExpanded = false
+    @StateObject private var derivedDataCache = CollectionDerivedDataCache()
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
-    @StateObject private var ladderZoomState = LadderZoomState()
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
 
@@ -36,13 +59,6 @@ struct CollectionView: View {
     /// content-space size they can reach at the minimum zoom.
     private static let layoutCounterScale: CGFloat = 1 / pow(defaultLadderScale, 0.46)
     private static let labelLayoutCounterScale: CGFloat = 1 / pow(labelRevealScale, 0.46)
-
-    private struct CollectionDerivedData {
-        var displayItems: [LadderDrinkDisplayItem]
-        var filteredItems: [LadderDrinkDisplayItem]
-        var sortedItems: [LadderDrinkDisplayItem]
-        var brandOptions: [String]
-    }
 
     private var isShowingMine: Bool {
         selectedCompendiumID == "mine"
@@ -78,34 +94,65 @@ struct CollectionView: View {
             items = drinks.map(LadderDrinkDisplayItem.init(drink:))
         }
 
-        let brandOptions = Self.brandOptions(from: items)
-        let normalizedQuery = normalizedSearchText
-        let rankByID = Self.searchRanks(for: items, normalizedQuery: normalizedQuery)
-        let filteredItems = items
-            .filter { item in
-                matchesActiveFilters(item, brandOptions: brandOptions, normalizedQuery: normalizedQuery, rankByID: rankByID)
-            }
-            .sorted { first, second in
-                filteredSort(first, second, rankByID: rankByID)
-            }
-        let sortedItems = filteredItems.sorted { first, second in
-            if first.rating == second.rating {
-                let firstScore = rankByID[first.id] ?? 0
-                let secondScore = rankByID[second.id] ?? 0
-                if firstScore != secondScore {
-                    return firstScore > secondScore
+        let key = derivedDataCacheKey(for: items)
+        return derivedDataCache.snapshot(for: key) {
+            let brandOptions = Self.brandOptions(from: items)
+            let normalizedQuery = normalizedSearchText
+            let rankByID = Self.searchRanks(for: items, normalizedQuery: normalizedQuery)
+            let filteredItems = items
+                .filter { item in
+                    matchesActiveFilters(item, brandOptions: brandOptions, normalizedQuery: normalizedQuery, rankByID: rankByID)
                 }
-                return first.createdAt > second.createdAt
+                .sorted { first, second in
+                    filteredSort(first, second, rankByID: rankByID)
+                }
+            let sortedItems = filteredItems.sorted { first, second in
+                if first.rating == second.rating {
+                    let firstScore = rankByID[first.id] ?? 0
+                    let secondScore = rankByID[second.id] ?? 0
+                    if firstScore != secondScore {
+                        return firstScore > secondScore
+                    }
+                    return first.createdAt > second.createdAt
+                }
+                return first.rating > second.rating
             }
-            return first.rating > second.rating
-        }
 
-        return CollectionDerivedData(
-            displayItems: items,
-            filteredItems: filteredItems,
-            sortedItems: sortedItems,
-            brandOptions: brandOptions
-        )
+            return CollectionDerivedData(
+                displayItems: items,
+                filteredItems: filteredItems,
+                sortedItems: sortedItems,
+                brandOptions: brandOptions
+            )
+        }
+    }
+
+    private func derivedDataCacheKey(for items: [LadderDrinkDisplayItem]) -> String {
+        let filterKey = [
+            selectedCompendiumID,
+            normalizedSearchText,
+            selectedBrandFilter ?? "*",
+            selectedRatingBand.id
+        ].joined(separator: "#")
+        let itemKey = items.map { item in
+            [
+                item.id,
+                String(format: "%.3f", item.rating),
+                item.brand,
+                item.name,
+                item.sweetness,
+                item.iceLevel,
+                String(format: "%.3f", item.consumedAt.timeIntervalSince1970),
+                item.location,
+                item.note,
+                item.isLimited ? "1" : "0",
+                "\(item.cupCount)",
+                item.stickerImageName ?? item.stickerFileURL?.lastPathComponent ?? "",
+                String(format: "%.3f", item.createdAt.timeIntervalSince1970)
+            ].joined(separator: "#")
+        }
+        .joined(separator: "|")
+        return "\(filterKey):\(itemKey)"
     }
 
     private static func brandOptions(from items: [LadderDrinkDisplayItem]) -> [String] {
@@ -243,11 +290,14 @@ struct CollectionView: View {
 
             ZoomableLadderView(
                 zoomScale: $ladderScale,
-                zoomState: ladderZoomState,
                 contentSize: layout.canvasSize,
+                metrics: layout.metrics,
                 entries: layout.entries,
                 contentSignature: layout.contentSignature,
                 allowsDragging: isShowingMine,
+                draggedItemID: draggingItem?.id,
+                dragTranslation: dragTranslation,
+                isOverDeleteTarget: isOverDeleteTarget,
                 onTapItem: { item in
                     guard draggingItem == nil, dragTranslation == .zero else { return }
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
@@ -290,38 +340,7 @@ struct CollectionView: View {
                         isOverDeleteTarget = false
                     }
                 }
-            ) {
-                ZStack {
-                    LadderAxisView(metrics: layout.metrics)
-
-                    ForEach(layout.entries) { entry in
-                        let isDraggedEntry = draggingItem?.id == entry.item.id
-                        let liftScale: CGFloat = isDraggedEntry ? (isOverDeleteTarget ? 1.2 : 1.14) : 1
-                        let liftOffset: CGFloat = isDraggedEntry ? -12 : 0
-                        LadderDrinkNode(
-                            entry: entry,
-                            zoomState: ladderZoomState
-                        )
-                            .scaleEffect(liftScale)
-                            .offset(y: liftOffset)
-                            .offset(isDraggedEntry ? dragTranslation : .zero)
-                            .shadow(
-                                color: isDraggedEntry ? (isOverDeleteTarget ? .red.opacity(0.26) : .black.opacity(0.22)) : .clear,
-                                radius: isDraggedEntry ? (isOverDeleteTarget ? 22 : 16) : 0,
-                                y: isDraggedEntry ? (isOverDeleteTarget ? 12 : 9) : 0
-                            )
-                            .position(entry.position)
-                            .zIndex(isDraggedEntry ? 20_000 : 10_000 - Double(entry.position.y))
-                            .allowsHitTesting(false)
-                            .transition(.opacity.combined(with: .scale(scale: 0.82)))
-                            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: isDraggedEntry)
-                            .animation(.spring(response: 0.2, dampingFraction: 0.68), value: isOverDeleteTarget)
-                    }
-                }
-                .frame(width: layout.canvasSize.width, height: layout.canvasSize.height)
-                .contentShape(Rectangle())
-                .animation(.spring(response: 0.36, dampingFraction: 0.84), value: layout.contentSignature)
-            }
+            )
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("评分天梯图")
         }
@@ -591,6 +610,10 @@ struct CollectionView: View {
         let rawProgress = (clampedLadderScale(scale) - labelFadeStartScale) / (labelRevealScale - labelFadeStartScale)
         let clamped = min(1, max(0, rawProgress))
         return clamped * clamped * (3 - 2 * clamped)
+    }
+
+    fileprivate static func settledLabelOpacity(for scale: CGFloat) -> CGFloat {
+        labelRevealProgress(for: scale) > 0 ? 1 : 0
     }
 
     private func ladderLayoutCacheKey(for viewport: CGSize) -> String {
@@ -1199,20 +1222,19 @@ private struct LadderTopDock: View {
                 Button {
                     selectedBrand = nil
                 } label: {
-                    Label("全部品牌", systemImage: selectedBrand == nil ? "checkmark" : "tag")
+                    filterMenuTitle("全部品牌", isSelected: selectedBrand == nil)
                 }
 
                 ForEach(brandOptions, id: \.self) { brand in
                     Button {
                         selectedBrand = brand
                     } label: {
-                        Label(brand, systemImage: selectedBrand == brand ? "checkmark" : "tag")
+                        filterMenuTitle(brand, isSelected: selectedBrand == brand)
                     }
                 }
             } label: {
                 filterChip(
                     title: selectedBrand ?? "全部品牌",
-                    systemImage: "tag",
                     isActive: selectedBrand != nil
                 )
             }
@@ -1223,13 +1245,12 @@ private struct LadderTopDock: View {
                     Button {
                         selectedRatingBand = band
                     } label: {
-                        Label(band.title, systemImage: selectedRatingBand == band ? "checkmark" : "line.3.horizontal.decrease")
+                        filterMenuTitle(band.title, isSelected: selectedRatingBand == band)
                     }
                 }
             } label: {
                 filterChip(
                     title: selectedRatingBand.title,
-                    systemImage: "star.leadinghalf.filled",
                     isActive: selectedRatingBand != .all
                 )
             }
@@ -1256,10 +1277,18 @@ private struct LadderTopDock: View {
             .clipShape(Capsule())
     }
 
-    private func filterChip(title: String, systemImage: String, isActive: Bool) -> some View {
+    private func filterMenuTitle(_ title: String, isSelected: Bool) -> some View {
+        HStack {
+            Text(title)
+            if isSelected {
+                Spacer()
+                Image(systemName: "checkmark")
+            }
+        }
+    }
+
+    private func filterChip(title: String, isActive: Bool) -> some View {
         HStack(spacing: 6) {
-            Image(systemName: systemImage)
-                .font(.system(size: 11, weight: .bold))
             Text(title)
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
@@ -1284,73 +1313,53 @@ private struct LadderLayoutSnapshot {
 }
 
 private final class LadderLayoutCache: ObservableObject {
-    private var cachedKey: String?
-    private var cachedSnapshot: LadderLayoutSnapshot?
+    private var snapshots: [String: LadderLayoutSnapshot] = [:]
+    private var accessOrder: [String] = []
+    private let capacity = 12
 
     func snapshot(for key: String, build: () -> LadderLayoutSnapshot) -> LadderLayoutSnapshot {
-        if cachedKey == key, let cachedSnapshot {
+        if let cachedSnapshot = snapshots[key] {
+            markRecentlyUsed(key)
             return cachedSnapshot
         }
 
         let snapshot = build()
-        cachedKey = key
-        cachedSnapshot = snapshot
+        snapshots[key] = snapshot
+        markRecentlyUsed(key)
+        trimIfNeeded()
         return snapshot
     }
-}
 
-private final class LadderZoomState: ObservableObject {
-    let objectWillChange = ObservableObjectPublisher()
-    private(set) var counterScale: CGFloat
-    private(set) var labelOpacity: CGFloat
-
-    init(scale: CGFloat = CollectionView.defaultLadderScale) {
-        counterScale = CollectionView.nodeCounterScale(for: scale)
-        labelOpacity = CollectionView.labelRevealProgress(for: scale)
+    private func markRecentlyUsed(_ key: String) {
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
     }
 
-    func apply(scale: CGFloat, publishesLabelOpacity: Bool = true) {
-        let nextCounterScale = CollectionView.nodeCounterScale(for: scale)
-        let nextLabelOpacity = publishesLabelOpacity ? CollectionView.labelRevealProgress(for: scale) : labelOpacity
-        update(counterScale: nextCounterScale, labelOpacity: nextLabelOpacity)
-    }
-
-    func applyLabelOpacity(scale: CGFloat) {
-        update(counterScale: counterScale, labelOpacity: CollectionView.labelRevealProgress(for: scale))
-    }
-
-    private func update(counterScale nextCounterScale: CGFloat, labelOpacity nextLabelOpacity: CGFloat) {
-        guard abs(counterScale - nextCounterScale) > 0.001
-            || abs(labelOpacity - nextLabelOpacity) > 0.001 else {
-            return
-        }
-
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            objectWillChange.send()
-            counterScale = nextCounterScale
-            labelOpacity = nextLabelOpacity
+    private func trimIfNeeded() {
+        while accessOrder.count > capacity, let oldest = accessOrder.first {
+            accessOrder.removeFirst()
+            snapshots[oldest] = nil
         }
     }
 }
 
-private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
+private struct ZoomableLadderView: UIViewRepresentable {
     @Binding var zoomScale: CGFloat
-    let zoomState: LadderZoomState
     let contentSize: CGSize
+    let metrics: LadderMetrics
     let entries: [LadderDrinkEntry]
     let contentSignature: String
     let allowsDragging: Bool
+    let draggedItemID: String?
+    let dragTranslation: CGSize
+    let isOverDeleteTarget: Bool
     let onTapItem: (LadderDrinkDisplayItem) -> Void
     let onDragChanged: (LadderDrinkDisplayItem, CGSize, Bool) -> Void
     let onDragEnded: (LadderDrinkDisplayItem?, Bool) -> Void
-    @ViewBuilder var content: Content
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             zoomScale: $zoomScale,
-            zoomState: zoomState,
             allowsDragging: allowsDragging,
             onTapItem: onTapItem,
             onDragChanged: onDragChanged,
@@ -1388,26 +1397,16 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.layer.drawsAsynchronously = true
 
-        let hostingController = context.coordinator.hostingController
-        hostingController.view.backgroundColor = .clear
-        hostingController.view.layer.drawsAsynchronously = true
-        hostingController.view.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.addSubview(hostingController.view)
-        context.coordinator.hostedView = hostingController.view
-
-        let widthConstraint = hostingController.view.widthAnchor.constraint(equalToConstant: contentSize.width)
-        let heightConstraint = hostingController.view.heightAnchor.constraint(equalToConstant: contentSize.height)
-        context.coordinator.widthConstraint = widthConstraint
-        context.coordinator.heightConstraint = heightConstraint
-
-        NSLayoutConstraint.activate([
-            hostingController.view.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
-            hostingController.view.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
-            hostingController.view.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-            hostingController.view.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
-            widthConstraint,
-            heightConstraint
-        ])
+        let canvasView = LadderCanvasUIView()
+        canvasView.backgroundColor = .clear
+        canvasView.layer.drawsAsynchronously = true
+        canvasView.frame = CGRect(origin: .zero, size: contentSize)
+        canvasView.configure(metrics: metrics, entries: entries, contentSize: contentSize)
+        canvasView.applyZoom(scale: zoomScale, mode: .settled)
+        canvasView.updateDragState(draggedItemID: draggedItemID, translation: dragTranslation, isOverDeleteTarget: isOverDeleteTarget)
+        scrollView.addSubview(canvasView)
+        scrollView.contentSize = contentSize
+        context.coordinator.canvasView = canvasView
 
         context.coordinator.scrollView = scrollView
         context.coordinator.contentSize = contentSize
@@ -1422,24 +1421,32 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             context.coordinator.didCenterInitialPosition = false
         }
 
-        context.coordinator.hostingController.rootView = AnyView(content)
         context.coordinator.zoomScale = $zoomScale
-        context.coordinator.zoomState = zoomState
         context.coordinator.entries = entries
         context.coordinator.allowsDragging = allowsDragging
         context.coordinator.contentSize = contentSize
         if sizeDidChange {
-            context.coordinator.widthConstraint?.constant = contentSize.width
-            context.coordinator.heightConstraint?.constant = contentSize.height
+            scrollView.contentSize = contentSize
+            context.coordinator.canvasView?.frame = CGRect(origin: .zero, size: contentSize)
         }
+
+        if contentDidChange || sizeDidChange {
+            context.coordinator.canvasView?.configure(metrics: metrics, entries: entries, contentSize: contentSize)
+        }
+        context.coordinator.canvasView?.updateDragState(
+            draggedItemID: draggedItemID,
+            translation: dragTranslation,
+            isOverDeleteTarget: isOverDeleteTarget
+        )
 
         if !context.coordinator.isZooming,
            abs(scrollView.zoomScale - zoomScale) > 0.001 {
             scrollView.setZoomScale(zoomScale, animated: false)
         }
-        if !context.coordinator.isZooming {
-            context.coordinator.zoomState.apply(scale: scrollView.zoomScale)
-        }
+        context.coordinator.canvasView?.applyZoom(
+            scale: scrollView.zoomScale,
+            mode: context.coordinator.isZooming ? .preview : .settled
+        )
 
         if !context.coordinator.isZooming || contentDidChange || sizeDidChange {
             scrollView.layoutIfNeeded()
@@ -1449,17 +1456,13 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var zoomScale: Binding<CGFloat>
-        var zoomState: LadderZoomState
         var entries: [LadderDrinkEntry] = []
         var allowsDragging: Bool
         let onTapItem: (LadderDrinkDisplayItem) -> Void
         let onDragChanged: (LadderDrinkDisplayItem, CGSize, Bool) -> Void
         let onDragEnded: (LadderDrinkDisplayItem?, Bool) -> Void
-        let hostingController: UIHostingController<AnyView>
-        weak var hostedView: UIView?
+        weak var canvasView: LadderCanvasUIView?
         weak var scrollView: UIScrollView?
-        weak var widthConstraint: NSLayoutConstraint?
-        weak var heightConstraint: NSLayoutConstraint?
         var isZooming = false
         var didCenterInitialPosition = false
         var contentSize: CGSize = .zero
@@ -1468,34 +1471,24 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         var longPressedItem: LadderDrinkDisplayItem?
         var longPressStartContentPoint: CGPoint = .zero
         var lastZoomInteractionAt: TimeInterval = 0
-        var lastLiveCounterUpdateAt: TimeInterval = 0
-        var lastLiveLabelUpdateAt: TimeInterval = 0
-        var lastReportedLabelScale: CGFloat = 0
         private let zoomGestureCooldown: TimeInterval = 0.3
-        private let liveCounterUpdateInterval: TimeInterval = 1.0 / 30.0
-        private let liveCounterScaleStep: CGFloat = 0.025
-        private let liveLabelUpdateInterval: TimeInterval = 1.0 / 12.0
-        private let liveLabelScaleStep: CGFloat = 0.08
 
         init(
             zoomScale: Binding<CGFloat>,
-            zoomState: LadderZoomState,
             allowsDragging: Bool,
             onTapItem: @escaping (LadderDrinkDisplayItem) -> Void,
             onDragChanged: @escaping (LadderDrinkDisplayItem, CGSize, Bool) -> Void,
             onDragEnded: @escaping (LadderDrinkDisplayItem?, Bool) -> Void
         ) {
             self.zoomScale = zoomScale
-            self.zoomState = zoomState
             self.allowsDragging = allowsDragging
             self.onTapItem = onTapItem
             self.onDragChanged = onDragChanged
             self.onDragEnded = onDragEnded
-            hostingController = UIHostingController(rootView: AnyView(EmptyView()))
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            hostedView
+            canvasView
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -1548,8 +1541,8 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         }
 
         private func contentPoint(for scrollViewPoint: CGPoint) -> CGPoint {
-            guard let scrollView, let hostedView else { return scrollViewPoint }
-            return hostedView.convert(scrollViewPoint, from: scrollView)
+            guard let scrollView, let canvasView else { return scrollViewPoint }
+            return canvasView.convert(scrollViewPoint, from: scrollView)
         }
 
         private func isPointOverDeleteTarget(_ point: CGPoint, in scrollView: UIScrollView) -> Bool {
@@ -1557,8 +1550,8 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         }
 
         private func entry(at scrollViewPoint: CGPoint) -> LadderDrinkEntry? {
-            guard let scrollView, let hostedView else { return nil }
-            let contentPoint = hostedView.convert(scrollViewPoint, from: scrollView)
+            guard let scrollView, let canvasView else { return nil }
+            let contentPoint = canvasView.convert(scrollViewPoint, from: scrollView)
             return entries
                 .reversed()
                 .first { entry in
@@ -1574,11 +1567,14 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
         }
 
         private func hitSize(for entry: LadderDrinkEntry) -> CGSize {
-            let shouldIncludeLabel = entry.canShowLabel && zoomState.labelOpacity > 0.2
+            let scale = scrollView?.zoomScale ?? zoomScale.wrappedValue
+            let labelOpacity = CollectionView.settledLabelOpacity(for: scale)
+            let counterScale = CollectionView.nodeCounterScale(for: scale)
+            let shouldIncludeLabel = entry.canShowLabel && labelOpacity > 0.2
             let baseWidth = shouldIncludeLabel ? entry.metrics.labelWidth : 52
             return CGSize(
-                width: baseWidth * zoomState.counterScale,
-                height: 64 * zoomState.counterScale
+                width: baseWidth * counterScale,
+                height: 64 * counterScale
             )
         }
 
@@ -1622,53 +1618,21 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             isZooming = true
             let now = CACurrentMediaTime()
             lastZoomInteractionAt = now
-            lastLiveCounterUpdateAt = now
-            lastLiveLabelUpdateAt = now
             lastReportedZoomScale = scrollView.zoomScale
-            lastReportedLabelScale = scrollView.zoomScale
-            zoomState.apply(scale: scrollView.zoomScale, publishesLabelOpacity: false)
+            canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .preview)
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            let now = CACurrentMediaTime()
-            lastZoomInteractionAt = now
-            updateLiveCounterScaleIfNeeded(for: scrollView.zoomScale, now: now)
-            updateLiveLabelOpacityIfNeeded(for: scrollView.zoomScale, now: now)
+            lastZoomInteractionAt = CACurrentMediaTime()
+            canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .preview)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             isZooming = false
             lastZoomInteractionAt = CACurrentMediaTime()
-            zoomState.apply(scale: scale, publishesLabelOpacity: true)
+            canvasView?.applyZoom(scale: scale, mode: .settled, animatesLabel: true)
             reportZoomScale(scale)
             lastReportedZoomScale = scale
-            lastReportedLabelScale = scale
-        }
-
-        private func updateLiveCounterScaleIfNeeded(for scale: CGFloat, now: TimeInterval) {
-            guard now - lastLiveCounterUpdateAt >= liveCounterUpdateInterval
-                || abs(scale - lastReportedZoomScale) >= liveCounterScaleStep else {
-                return
-            }
-            zoomState.apply(scale: scale, publishesLabelOpacity: false)
-            lastLiveCounterUpdateAt = now
-            lastReportedZoomScale = scale
-        }
-
-        private func updateLiveLabelOpacityIfNeeded(for scale: CGFloat, now: TimeInterval) {
-            let previousProgress = CollectionView.labelRevealProgress(for: lastReportedLabelScale)
-            let nextProgress = CollectionView.labelRevealProgress(for: scale)
-            let crossedRevealBoundary = previousProgress == 0 && nextProgress > 0
-                || previousProgress < 1 && nextProgress == 1
-                || previousProgress > 0 && nextProgress == 0
-            guard crossedRevealBoundary
-                || now - lastLiveLabelUpdateAt >= liveLabelUpdateInterval
-                || abs(scale - lastReportedLabelScale) >= liveLabelScaleStep else {
-                return
-            }
-            zoomState.applyLabelOpacity(scale: scale)
-            lastLiveLabelUpdateAt = now
-            lastReportedLabelScale = scale
         }
 
         private func reportZoomScale(_ scale: CGFloat) {
@@ -1708,6 +1672,7 @@ private struct ZoomableLadderView<Content: View>: UIViewRepresentable {
             scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
             lastReportedZoomScale = scrollView.zoomScale
             didCenterInitialPosition = true
+            canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .settled)
         }
     }
 }
@@ -1805,8 +1770,9 @@ private struct LadderDrinkEntryMetrics {
         let brand = item.brand.trimmingCharacters(in: .whitespacesAndNewlines)
         displayName = name.isEmpty ? "未命名" : name
         displayBrand = brand.isEmpty ? "未知品牌" : brand
-        let longest = max(displayName.count, displayBrand.count)
-        labelWidth = min(156, max(76, CGFloat(longest) * 10 + 24))
+        let nameWidth = displayName.size(withAttributes: [.font: UIFont.systemFont(ofSize: 9, weight: .semibold)]).width
+        let brandWidth = displayBrand.size(withAttributes: [.font: UIFont.systemFont(ofSize: 8)]).width
+        labelWidth = min(156, max(44, ceil(max(nameWidth, brandWidth)) + 16))
         accessibilityLabel = "\(displayBrand)，\(displayName)，评分 \(String(format: "%.2f", item.rating))"
     }
 }
@@ -1829,140 +1795,341 @@ private struct LadderPlacement {
     let canShowLabel: Bool
 }
 
-private struct LadderAxisView: View {
-    let metrics: LadderMetrics
+private final class LadderCanvasUIView: UIView {
+    enum LabelMode {
+        case preview
+        case settled
+    }
 
-    var body: some View {
-        ZStack {
-            Path { path in
-                path.move(to: CGPoint(x: metrics.centerX, y: metrics.plotTop))
-                path.addLine(to: CGPoint(x: metrics.centerX, y: metrics.plotBottom))
-            }
-            .stroke(.black.opacity(0.26), style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [5, 10]))
+    private let axisLayer = CALayer()
+    private let nodeContainerLayer = CALayer()
+    private var nodeLayers: [String: LadderNodeLayer] = [:]
+    private var draggedItemID: String?
+    private var dragTranslation: CGSize = .zero
+    private var isOverDeleteTarget = false
+    private var currentScale = CollectionView.defaultLadderScale
+    private var currentLabelMode = LabelMode.settled
 
-            ForEach(0...5, id: \.self) { score in
-                let y = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isOpaque = false
+        layer.addSublayer(axisLayer)
+        layer.addSublayer(nodeContainerLayer)
+    }
 
-                if score != 5 {
-                    Path { path in
-                        path.move(to: CGPoint(x: 18, y: y))
-                        path.addLine(to: CGPoint(x: metrics.centerX - metrics.axisLineGap, y: y))
-                        path.move(to: CGPoint(x: metrics.centerX + metrics.axisLineGap, y: y))
-                        path.addLine(to: CGPoint(x: metrics.size.width - 18, y: y))
-                    }
-                    .stroke(.black.opacity(0.2), style: StrokeStyle(lineWidth: 0.85, lineCap: .round, dash: [8, 12]))
-                }
+    required init?(coder: NSCoder) {
+        nil
+    }
 
-                if score > 1 {
-                    let midY = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight + metrics.plotHeight / 10
-                    Path { path in
-                        path.move(to: CGPoint(x: metrics.centerX - 28, y: midY))
-                        path.addLine(to: CGPoint(x: metrics.centerX + 28, y: midY))
-                    }
-                    .stroke(.black.opacity(0.12), style: StrokeStyle(lineWidth: 0.7, lineCap: .round))
-                }
+    func configure(metrics: LadderMetrics, entries: [LadderDrinkEntry], contentSize: CGSize) {
+        withoutLayerActions {
+            bounds = CGRect(origin: .zero, size: contentSize)
+            axisLayer.frame = bounds
+            nodeContainerLayer.frame = bounds
+            rebuildAxis(metrics: metrics)
+            rebuildNodes(entries: entries)
+            applyZoom(scale: currentScale, mode: currentLabelMode)
+        }
+    }
 
+    func updateDragState(draggedItemID: String?, translation: CGSize, isOverDeleteTarget: Bool) {
+        self.draggedItemID = draggedItemID
+        dragTranslation = translation
+        self.isOverDeleteTarget = isOverDeleteTarget
+        applyZoom(scale: currentScale, mode: currentLabelMode)
+    }
+
+    func applyZoom(scale: CGFloat, mode: LabelMode, animatesLabel: Bool = false) {
+        currentScale = scale
+        currentLabelMode = mode
+        let counterScale = CollectionView.nodeCounterScale(for: scale)
+        let labelOpacity: CGFloat = switch mode {
+        case .preview:
+            CollectionView.labelRevealProgress(for: scale)
+        case .settled:
+            CollectionView.settledLabelOpacity(for: scale)
+        }
+        withoutLayerActions {
+            nodeLayers.values.forEach { nodeLayer in
+                let isDragged = nodeLayer.entry.item.id == draggedItemID
+                nodeLayer.apply(
+                    counterScale: counterScale,
+                    labelOpacity: labelOpacity,
+                    isDragged: isDragged,
+                    dragTranslation: dragTranslation,
+                    isOverDeleteTarget: isOverDeleteTarget,
+                    animatesLabel: animatesLabel
+                )
             }
         }
     }
+
+    private func rebuildAxis(metrics: LadderMetrics) {
+        axisLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+
+        let verticalPath = UIBezierPath()
+        verticalPath.move(to: CGPoint(x: metrics.centerX, y: metrics.plotTop))
+        verticalPath.addLine(to: CGPoint(x: metrics.centerX, y: metrics.plotBottom))
+        axisLayer.addSublayer(shapeLayer(
+            path: verticalPath.cgPath,
+            color: UIColor.black.withAlphaComponent(0.26),
+            lineWidth: 1.2,
+            dashPattern: [5, 10]
+        ))
+
+        let horizontalPath = UIBezierPath()
+        let midPath = UIBezierPath()
+        for score in 0...5 {
+            let y = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight
+            if score != 5 {
+                horizontalPath.move(to: CGPoint(x: 18, y: y))
+                horizontalPath.addLine(to: CGPoint(x: metrics.centerX - metrics.axisLineGap, y: y))
+                horizontalPath.move(to: CGPoint(x: metrics.centerX + metrics.axisLineGap, y: y))
+                horizontalPath.addLine(to: CGPoint(x: metrics.size.width - 18, y: y))
+            }
+            if score > 1 {
+                let midY = y + metrics.plotHeight / 10
+                midPath.move(to: CGPoint(x: metrics.centerX - 28, y: midY))
+                midPath.addLine(to: CGPoint(x: metrics.centerX + 28, y: midY))
+            }
+        }
+
+        axisLayer.addSublayer(shapeLayer(
+            path: horizontalPath.cgPath,
+            color: UIColor.black.withAlphaComponent(0.2),
+            lineWidth: 0.85,
+            dashPattern: [8, 12]
+        ))
+        axisLayer.addSublayer(shapeLayer(
+            path: midPath.cgPath,
+            color: UIColor.black.withAlphaComponent(0.12),
+            lineWidth: 0.7,
+            dashPattern: nil
+        ))
+    }
+
+    private func rebuildNodes(entries: [LadderDrinkEntry]) {
+        nodeContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        nodeLayers = Dictionary(entries.map { entry in
+            let nodeLayer = LadderNodeLayer(entry: entry)
+            nodeContainerLayer.addSublayer(nodeLayer)
+            return (entry.item.id, nodeLayer)
+        }, uniquingKeysWith: { _, latest in latest })
+    }
+
+    private func shapeLayer(path: CGPath, color: UIColor, lineWidth: CGFloat, dashPattern: [NSNumber]?) -> CAShapeLayer {
+        let layer = CAShapeLayer()
+        layer.path = path
+        layer.fillColor = UIColor.clear.cgColor
+        layer.strokeColor = color.cgColor
+        layer.lineWidth = lineWidth
+        layer.lineCap = .round
+        layer.lineDashPattern = dashPattern
+        layer.contentsScale = UIScreen.main.scale
+        return layer
+    }
 }
 
-private struct LadderDrinkNode: View {
+private final class LadderNodeLayer: CALayer {
     let entry: LadderDrinkEntry
-    @ObservedObject var zoomState: LadderZoomState
+    private let badgeLayer = CALayer()
+    private let badgeCircleLayer = CAShapeLayer()
+    private let stickerLayer = CALayer()
+    private let ratingBadgeLayer = CALayer()
+    private let ratingTextLayer = CATextLayer()
+    private let labelContainerLayer = CALayer()
+    private let nameTextLayer = CATextLayer()
+    private let brandTextLayer = CATextLayer()
+    private let nodeHeight: CGFloat = 54
+    private let badgeSize: CGFloat = 31
+    private let labelHeight: CGFloat = 24
 
-    var body: some View {
-        VStack(spacing: 3) {
-            LadderStickerBadge(item: entry.item)
-                .equatable()
+    init(entry: LadderDrinkEntry) {
+        self.entry = entry
+        super.init()
+        contentsScale = UIScreen.main.scale
+        bounds = CGRect(x: 0, y: 0, width: entry.metrics.labelWidth, height: nodeHeight)
+        position = entry.position
+        isGeometryFlipped = false
+        setupBadge()
+        setupLabel()
+        addSublayer(badgeLayer)
+        addSublayer(labelContainerLayer)
+        accessibilityLabel = entry.metrics.accessibilityLabel
+    }
 
-            labelView
-                .opacity(renderedLabelOpacity)
-                .offset(y: -3 * (1 - visibleLabelOpacity))
-                .allowsHitTesting(visibleLabelOpacity > 0.95)
-                .transaction { transaction in
-                    transaction.animation = nil
-                }
+    override init(layer: Any) {
+        guard let layer = layer as? LadderNodeLayer else {
+            fatalError("Unsupported layer copy")
         }
-        .frame(width: entry.metrics.labelWidth, height: 54, alignment: .top)
-        .scaleEffect(zoomState.counterScale)
-        .contentShape(Rectangle())
-        .accessibilityLabel(entry.metrics.accessibilityLabel)
+        entry = layer.entry
+        super.init(layer: layer)
     }
 
-    private var labelView: some View {
-        VStack(spacing: 1) {
-            Text(entry.metrics.displayName)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
+    required init?(coder: NSCoder) {
+        nil
+    }
 
-            Text(entry.metrics.displayBrand)
-                .font(.system(size: 8))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+    func apply(
+        counterScale: CGFloat,
+        labelOpacity: CGFloat,
+        isDragged: Bool,
+        dragTranslation: CGSize,
+        isOverDeleteTarget: Bool,
+        animatesLabel: Bool
+    ) {
+        let liftScale: CGFloat = isDragged ? (isOverDeleteTarget ? 1.2 : 1.14) : 1
+        let liftOffset: CGFloat = isDragged ? -12 : 0
+        position = CGPoint(
+            x: entry.position.x + (isDragged ? dragTranslation.width : 0),
+            y: entry.position.y + liftOffset + (isDragged ? dragTranslation.height : 0)
+        )
+        transform = CATransform3DMakeScale(counterScale * liftScale, counterScale * liftScale, 1)
+        zPosition = isDragged ? 20_000 : 10_000 - entry.position.y
+
+        if isDragged {
+            shadowColor = (isOverDeleteTarget ? UIColor.red : UIColor.black).cgColor
+            shadowOpacity = isOverDeleteTarget ? 0.26 : 0.22
+            shadowRadius = isOverDeleteTarget ? 22 : 16
+            shadowOffset = CGSize(width: 0, height: isOverDeleteTarget ? 12 : 9)
+        } else {
+            shadowOpacity = 0
+            shadowRadius = 0
+            shadowOffset = .zero
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(.white.opacity(0.9))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .shadow(color: .black.opacity(0.05), radius: 4, y: 2)
-        .frame(width: entry.metrics.labelWidth)
+
+        let visibleLabelOpacity = entry.canShowLabel ? labelOpacity : 0
+        let renderedLabelOpacity = Float(entry.canShowLabel && visibleLabelOpacity > 0 ? max(0.003, visibleLabelOpacity) : 0)
+        if animatesLabel, labelContainerLayer.opacity != renderedLabelOpacity {
+            let animation = CABasicAnimation(keyPath: "opacity")
+            animation.fromValue = labelContainerLayer.presentation()?.opacity ?? labelContainerLayer.opacity
+            animation.toValue = renderedLabelOpacity
+            animation.duration = 0.18
+            animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            labelContainerLayer.opacity = renderedLabelOpacity
+            labelContainerLayer.add(animation, forKey: "settledLabelOpacity")
+        } else {
+            labelContainerLayer.opacity = renderedLabelOpacity
+        }
+        labelContainerLayer.frame.origin.y = 34 - 3 * (1 - visibleLabelOpacity)
     }
 
-    private var visibleLabelOpacity: CGFloat {
-        entry.canShowLabel ? zoomState.labelOpacity : 0
+    private func setupBadge() {
+        badgeLayer.frame = CGRect(
+            x: (bounds.width - badgeSize) / 2,
+            y: 0,
+            width: badgeSize,
+            height: badgeSize
+        )
+
+        badgeCircleLayer.frame = badgeLayer.bounds
+        badgeCircleLayer.path = UIBezierPath(ovalIn: badgeLayer.bounds).cgPath
+        badgeCircleLayer.fillColor = UIColor.white.withAlphaComponent(0.94).cgColor
+        badgeCircleLayer.strokeColor = UIColor.black.withAlphaComponent(0.12).cgColor
+        badgeCircleLayer.lineWidth = 1
+        badgeCircleLayer.shadowColor = UIColor.black.cgColor
+        badgeCircleLayer.shadowOpacity = 0.12
+        badgeCircleLayer.shadowRadius = 8
+        badgeCircleLayer.shadowOffset = CGSize(width: 0, height: 4)
+        badgeLayer.addSublayer(badgeCircleLayer)
+
+        stickerLayer.frame = badgeLayer.bounds.insetBy(dx: 5, dy: 5)
+        stickerLayer.contentsGravity = .resizeAspect
+        stickerLayer.contentsScale = UIScreen.main.scale
+        stickerLayer.contents = stickerContents()
+        badgeLayer.addSublayer(stickerLayer)
+
+        let ratingText = String(format: "%.2f", entry.item.rating)
+        let ratingFont = UIFont.monospacedDigitSystemFont(ofSize: 6.5, weight: .bold)
+        let ratingWidth = max(22, ratingText.size(withAttributes: [.font: ratingFont]).width + 6)
+        ratingBadgeLayer.frame = CGRect(
+            x: badgeLayer.bounds.maxX - ratingWidth + 5,
+            y: badgeLayer.bounds.maxY - 9,
+            width: ratingWidth,
+            height: 12
+        )
+        ratingBadgeLayer.backgroundColor = UIColor.black.withAlphaComponent(0.78).cgColor
+        ratingBadgeLayer.cornerRadius = 6
+        ratingBadgeLayer.masksToBounds = true
+        badgeLayer.addSublayer(ratingBadgeLayer)
+
+        ratingTextLayer.frame = CGRect(x: 3, y: 1.5, width: ratingWidth - 6, height: 9)
+        configureTextLayer(
+            ratingTextLayer,
+            text: ratingText,
+            font: ratingFont,
+            color: .white,
+            alignment: .center
+        )
+        ratingBadgeLayer.addSublayer(ratingTextLayer)
     }
 
-    private var renderedLabelOpacity: CGFloat {
-        entry.canShowLabel ? max(0.003, visibleLabelOpacity) : 0
+    private func setupLabel() {
+        labelContainerLayer.frame = CGRect(x: 0, y: 34, width: bounds.width, height: labelHeight)
+        labelContainerLayer.backgroundColor = UIColor.white.withAlphaComponent(0.9).cgColor
+        labelContainerLayer.cornerRadius = 8
+        labelContainerLayer.shadowColor = UIColor.black.cgColor
+        labelContainerLayer.shadowOpacity = 0.05
+        labelContainerLayer.shadowRadius = 4
+        labelContainerLayer.shadowOffset = CGSize(width: 0, height: 2)
+
+        nameTextLayer.frame = CGRect(x: 6, y: 3, width: bounds.width - 12, height: 11)
+        configureTextLayer(
+            nameTextLayer,
+            text: entry.metrics.displayName,
+            font: .systemFont(ofSize: 9, weight: .semibold),
+            color: .label,
+            alignment: .center
+        )
+        labelContainerLayer.addSublayer(nameTextLayer)
+
+        brandTextLayer.frame = CGRect(x: 6, y: 14, width: bounds.width - 12, height: 10)
+        configureTextLayer(
+            brandTextLayer,
+            text: entry.metrics.displayBrand,
+            font: .systemFont(ofSize: 8),
+            color: .secondaryLabel,
+            alignment: .center
+        )
+        labelContainerLayer.addSublayer(brandTextLayer)
     }
 
+    private func configureTextLayer(
+        _ layer: CATextLayer,
+        text: String,
+        font: UIFont,
+        color: UIColor,
+        alignment: CATextLayerAlignmentMode
+    ) {
+        layer.string = text
+        layer.font = font
+        layer.fontSize = font.pointSize
+        layer.foregroundColor = color.cgColor
+        layer.alignmentMode = alignment
+        layer.contentsScale = UIScreen.main.scale
+        layer.truncationMode = .end
+        layer.isWrapped = false
+    }
+
+    private func stickerContents() -> CGImage? {
+        if let cgImage = entry.item.stickerThumbnailImage?.cgImage {
+            return cgImage
+        }
+        guard let image = UIImage(systemName: "cup.and.saucer.fill")?
+            .withTintColor(UIColor.brown.withAlphaComponent(0.62), renderingMode: .alwaysOriginal) else {
+            return nil
+        }
+        return UIGraphicsImageRenderer(size: stickerLayer.bounds.size).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: stickerLayer.bounds.size))
+        }.cgImage
+    }
 }
 
-private struct LadderStickerBadge: View, Equatable {
-    let item: LadderDrinkDisplayItem
-
-    static func == (lhs: LadderStickerBadge, rhs: LadderStickerBadge) -> Bool {
-        lhs.item.id == rhs.item.id
-            && lhs.item.stickerImageName == rhs.item.stickerImageName
-            && lhs.item.stickerFileURL == rhs.item.stickerFileURL
-            && lhs.item.rating == rhs.item.rating
-    }
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(.white.opacity(0.94))
-                .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
-
-            if let image = item.stickerThumbnailImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(5)
-            } else {
-                Image(systemName: "cup.and.saucer.fill")
-                    .font(.system(size: 19))
-                    .foregroundStyle(.brown.opacity(0.62))
-            }
-        }
-        .frame(width: 31, height: 31)
-        .overlay(
-            Circle()
-                .stroke(.black.opacity(0.12), lineWidth: 1)
-        )
-        .overlay(alignment: .bottomTrailing) {
-            Text(String(format: "%.2f", item.rating))
-                .font(.system(size: 6.5, weight: .bold, design: .rounded).monospacedDigit())
-                .foregroundStyle(.white)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1.5)
-                .background(.black.opacity(0.78))
-                .clipShape(Capsule())
-                .offset(x: 5, y: 3)
-        }
-    }
+private func withoutLayerActions(_ changes: () -> Void) {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    changes()
+    CATransaction.commit()
 }
 
 private struct LeverGlassSurfaceModifier: ViewModifier {
