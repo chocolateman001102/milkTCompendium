@@ -2,6 +2,12 @@ import SwiftUI
 import UIKit
 
 struct CompendiumComparisonView: View {
+    fileprivate static let minimumZoomScale: CGFloat = 0.44
+    fileprivate static let initialZoomScale: CGFloat = minimumZoomScale
+    private static let ladderTopControlClearance: CGFloat = 154
+    private static let ladderBottomControlClearance: CGFloat = 42
+    private static let ladderCanvasVerticalSafePadding: CGFloat = 96
+
     let localDrinks: [Drink]
     let sharedCompendiums: [SharedCompendium]
     let initialOwnerID: String
@@ -9,7 +15,7 @@ struct CompendiumComparisonView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedOwnerID: String
-    @State private var zoomScale: CGFloat = 0.48
+    @State private var zoomScale: CGFloat = Self.initialZoomScale
     @State private var centerResetToken = 0
     @State private var selectedNode: ComparisonDrinkNode?
     @StateObject private var layoutCache = ComparisonLadderLayoutCache()
@@ -93,7 +99,7 @@ struct CompendiumComparisonView: View {
         }
         .onChange(of: selectedOwnerID) { _, _ in
             selectedNode = nil
-            zoomScale = 0.48
+            zoomScale = Self.initialZoomScale
             centerResetToken += 1
         }
     }
@@ -103,7 +109,11 @@ struct CompendiumComparisonView: View {
             let layoutKey = layoutCacheKey(viewport: proxy.size)
             let layout = layoutCache.snapshot(for: layoutKey) {
                 let canvasSize = canvasSize(for: proxy.size)
-                let metrics = ComparisonLadderMetrics(size: canvasSize, topClearance: 154)
+                let metrics = ComparisonLadderMetrics(
+                    size: canvasSize,
+                    topClearance: Self.ladderTopControlClearance + Self.ladderCanvasVerticalSafePadding,
+                    bottomClearance: Self.ladderBottomControlClearance + Self.ladderCanvasVerticalSafePadding
+                )
                 return ComparisonLadderLayoutSnapshot(
                     canvasSize: canvasSize,
                     metrics: metrics,
@@ -186,7 +196,7 @@ struct CompendiumComparisonView: View {
 
                 Spacer(minLength: 8)
                 Button {
-                    zoomScale = 0.48
+                    zoomScale = Self.initialZoomScale
                     centerResetToken += 1
                 } label: {
                     Image(systemName: "scope")
@@ -242,7 +252,10 @@ struct CompendiumComparisonView: View {
         let count = CGFloat(max(visibleLocalNodes.count, visiblePeerNodes.count, 1))
         return CGSize(
             width: max(viewport.width * 2.36, 1040),
-            height: max(viewport.height * 2.28, 940 + count * 11)
+            height: max(
+                viewport.height * 2.28 + Self.ladderCanvasVerticalSafePadding * 2,
+                940 + count * 11 + Self.ladderCanvasVerticalSafePadding * 2
+            )
         )
     }
 
@@ -371,11 +384,11 @@ private struct ComparisonLadderMetrics {
     let peerAnchorX: CGFloat
     let axisLineGap: CGFloat = 82
 
-    init(size: CGSize, topClearance: CGFloat) {
+    init(size: CGSize, topClearance: CGFloat, bottomClearance: CGFloat = 42) {
         self.size = size
         self.topClearance = topClearance
         plotTop = topClearance
-        plotBottom = max(topClearance + 1, size.height - 42)
+        plotBottom = max(topClearance + 1, size.height - bottomClearance)
         centerX = size.width / 2
         localAnchorX = centerX - min(250, max(154, size.width * 0.22))
         peerAnchorX = centerX + min(250, max(154, size.width * 0.22))
@@ -420,10 +433,14 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+        let scrollView = ZoomCanvasScrollView()
+        let coordinator = context.coordinator
+        scrollView.onLayoutSubviews = { [weak coordinator] in
+            coordinator?.handleScrollViewLayout()
+        }
         scrollView.delegate = context.coordinator
         scrollView.pinchGestureRecognizer?.delegate = context.coordinator
-        scrollView.minimumZoomScale = 0.48
+        scrollView.minimumZoomScale = CompendiumComparisonView.minimumZoomScale
         scrollView.maximumZoomScale = 2.35
         scrollView.zoomScale = zoomScale
         scrollView.bouncesZoom = true
@@ -452,6 +469,14 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         context.coordinator.canvasView = canvasView
         context.coordinator.nodes = nodes
         context.coordinator.contentSize = contentSize
+        context.coordinator.viewport.attach(scrollView)
+        context.coordinator.viewport.update(
+            canvasSize: contentSize,
+            focusPoint: CGPoint(
+                x: metrics.centerX,
+                y: (metrics.plotTop + metrics.plotBottom) / 2
+            )
+        )
         return scrollView
     }
 
@@ -463,13 +488,18 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         context.coordinator.zoomScale = $zoomScale
         context.coordinator.nodes = nodes
         context.coordinator.contentSize = contentSize
+        context.coordinator.viewport.update(
+            canvasSize: contentSize,
+            focusPoint: CGPoint(
+                x: metrics.centerX,
+                y: (metrics.plotTop + metrics.plotBottom) / 2
+            )
+        )
         if contentDidChange {
             context.coordinator.contentSignature = contentSignature
-            context.coordinator.didCenterInitialPosition = false
         }
         if centerResetDidChange {
             context.coordinator.centerResetToken = centerResetToken
-            context.coordinator.didCenterInitialPosition = false
         }
         if sizeDidChange {
             scrollView.contentSize = contentSize
@@ -479,15 +509,15 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             context.coordinator.canvasView?.configure(metrics: metrics, nodes: nodes, connections: connections, contentSize: contentSize, contentSignature: contentSignature)
         }
 
-        let targetZoomScale = centerResetDidChange ? 0.48 : zoomScale
-        if !context.coordinator.isZooming, abs(scrollView.zoomScale - targetZoomScale) > 0.001 {
-            scrollView.setZoomScale(targetZoomScale, animated: false)
+        if !centerResetDidChange,
+           !context.coordinator.isZooming,
+           abs(scrollView.zoomScale - zoomScale) > 0.001 {
+            scrollView.setZoomScale(zoomScale, animated: false)
         }
         context.coordinator.canvasView?.applyZoom(scale: scrollView.zoomScale, mode: context.coordinator.isZooming ? .preview : .settled)
         context.coordinator.canvasView?.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
-        context.coordinator.centerInitialPositionIfNeeded()
         if centerResetDidChange || contentDidChange || sizeDidChange {
-            context.coordinator.scheduleDeferredCentering()
+            context.coordinator.viewport.requestReset(zoomScale: CompendiumComparisonView.initialZoomScale)
         }
     }
 
@@ -496,12 +526,12 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         let onTapNode: (ComparisonDrinkNode) -> Void
         weak var canvasView: ComparisonLadderCanvasUIView?
         weak var scrollView: UIScrollView?
+        let viewport = ZoomCanvasViewportController()
         var nodes: [ComparisonLadderNodeEntry] = []
         var contentSize: CGSize = .zero
         var contentSignature = ""
         var centerResetToken = 0
         var isZooming = false
-        var didCenterInitialPosition = false
         private var lastReportedZoomScale: CGFloat = 0
 
         init(zoomScale: Binding<CGFloat>, onTapNode: @escaping (ComparisonDrinkNode) -> Void) {
@@ -513,6 +543,10 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             canvasView
         }
 
+        func handleScrollViewLayout() {
+            viewport.handleLayout()
+        }
+
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard recognizer.state == .ended,
                   let scrollView,
@@ -522,6 +556,11 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
             isZooming = true
+            viewport.cancelPendingReset()
+        }
+
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            viewport.cancelPendingReset()
         }
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
@@ -530,41 +569,20 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
                 lastReportedZoomScale = scale
                 zoomScale.wrappedValue = scale
             }
+            viewport.updateContentInsets()
             canvasView?.applyZoom(scale: scale, mode: .preview)
-            centerContent(scrollView)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             isZooming = false
             zoomScale.wrappedValue = scale
+            viewport.updateContentInsets()
             canvasView?.applyZoom(scale: scale, mode: .settled, animatesLabel: true)
-            centerContent(scrollView)
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             guard gestureRecognizer is UITapGestureRecognizer, let scrollView else { return true }
             return entry(at: touch.location(in: scrollView)) != nil
-        }
-
-        func centerInitialPositionIfNeeded() {
-            guard !didCenterInitialPosition, let scrollView else { return }
-            didCenterInitialPosition = true
-            centerContent(scrollView)
-            let targetX = max(0, (scrollView.contentSize.width - scrollView.bounds.width) / 2)
-            let targetY = max(0, min(scrollView.contentSize.height - scrollView.bounds.height, 96))
-            scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
-        }
-
-        func scheduleDeferredCentering() {
-            DispatchQueue.main.async { [weak self] in
-                self?.centerInitialPositionIfNeeded()
-            }
-        }
-
-        private func centerContent(_ scrollView: UIScrollView) {
-            let horizontalInset = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
-            let verticalInset = max(0, (scrollView.bounds.height - scrollView.contentSize.height) / 2)
-            scrollView.contentInset = UIEdgeInsets(top: verticalInset, left: horizontalInset, bottom: verticalInset, right: horizontalInset)
         }
 
         private func entry(at scrollViewPoint: CGPoint) -> ComparisonLadderNodeEntry? {

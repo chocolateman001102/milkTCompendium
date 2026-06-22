@@ -40,7 +40,7 @@ struct CollectionView: View {
     @State private var isOverDeleteTarget = false
     @State private var selectedItem: LadderDrinkDisplayItem?
     @State private var editingDrink: Drink?
-    @State private var ladderScale: CGFloat = Self.defaultLadderScale
+    @State private var ladderScale: CGFloat = Self.initialLadderScale
     @State private var ladderCenterResetToken = 0
     @State private var searchText = ""
     @State private var selectedBrandFilter: String?
@@ -53,11 +53,21 @@ struct CollectionView: View {
     let onStartPhotoImport: () -> Void
 
     fileprivate static let defaultLadderScale: CGFloat = 0.44
+    fileprivate static let initialLadderScale: CGFloat = defaultLadderScale
     fileprivate static let labelFadeStartScale: CGFloat = 0.9
     fileprivate static let labelRevealScale: CGFloat = 1.1
     private let ladderTopControlClearance: CGFloat = 142
+    private let ladderCanvasVerticalSafePadding: CGFloat = 96
     private static let preferredSameColumnRatingGap: Double = 0.20
     private static let iconCollisionTolerance: CGFloat = 4
+
+    private var ladderPlotTopClearance: CGFloat {
+        ladderTopControlClearance + ladderCanvasVerticalSafePadding
+    }
+
+    private var ladderPlotBottomClearance: CGFloat {
+        34 + ladderCanvasVerticalSafePadding
+    }
 
     /// Stickers are always visible, so they are laid out against the largest
     /// content-space size they can reach at the minimum zoom.
@@ -313,7 +323,11 @@ struct CollectionView: View {
             let layoutKey = ladderLayoutCacheKey(for: proxy.size)
             let layout = ladderLayoutCache.snapshot(for: layoutKey) {
                 let canvasSize = ladderCanvasSize(for: proxy.size)
-                let metrics = LadderMetrics(size: canvasSize, topClearance: ladderTopControlClearance)
+                let metrics = LadderMetrics(
+                    size: canvasSize,
+                    topClearance: ladderPlotTopClearance,
+                    bottomClearance: ladderPlotBottomClearance
+                )
                 let entries = ladderEntries(in: metrics)
                 return LadderLayoutSnapshot(
                     canvasSize: canvasSize,
@@ -610,7 +624,7 @@ struct CollectionView: View {
         draggingItem = nil
         dragTranslation = .zero
         isOverDeleteTarget = false
-        ladderScale = Self.defaultLadderScale
+        ladderScale = Self.initialLadderScale
         ladderCenterResetToken += 1
     }
 
@@ -713,10 +727,14 @@ struct CollectionView: View {
         let iconCollisionHeight = iconProfile.compactNodeSize.height + iconProfile.compactCollisionPadding.height
         let labelCollisionHeight = labelProfile.labelBubbleSize.height + labelProfile.labelCollisionPadding.height
         let requiredPlotHeight = iconCollisionHeight * 5 / Self.preferredSameColumnRatingGap
-        let requiredHeight = ladderTopControlClearance + requiredPlotHeight + 34
-        let baseHeight = max(viewport.height * 2.28, densityHeight, requiredHeight)
-        let estimatedPlotBottom = max(ladderTopControlClearance + 720, baseHeight - 34)
-        let estimatedPlotHeight = max(1, estimatedPlotBottom - ladderTopControlClearance)
+        let requiredHeight = ladderPlotTopClearance + requiredPlotHeight + ladderPlotBottomClearance
+        let baseHeight = max(
+            viewport.height * 2.28 + ladderCanvasVerticalSafePadding * 2,
+            densityHeight + ladderCanvasVerticalSafePadding * 2,
+            requiredHeight
+        )
+        let estimatedPlotBottom = max(ladderPlotTopClearance + 720, baseHeight - ladderPlotBottomClearance)
+        let estimatedPlotHeight = max(1, estimatedPlotBottom - ladderPlotTopClearance)
         let ratingWindow = Double(max(iconCollisionHeight, labelCollisionHeight) / estimatedPlotHeight * 5)
         let requiredColumnsPerSide = max(2, Int(ceil(CGFloat(maxRatingClusterCount(in: ratingWindow)) / 2)))
         let columnSpacing = iconProfile.columnSpacing
@@ -1546,7 +1564,11 @@ private struct ZoomableLadderView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+        let scrollView = ZoomCanvasScrollView()
+        let coordinator = context.coordinator
+        scrollView.onLayoutSubviews = { [weak coordinator] in
+            coordinator?.handleScrollViewLayout()
+        }
         scrollView.delegate = context.coordinator
         scrollView.pinchGestureRecognizer?.delegate = context.coordinator
         scrollView.delaysContentTouches = false
@@ -1588,6 +1610,14 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         context.coordinator.scrollView = scrollView
         context.coordinator.contentSize = contentSize
+        context.coordinator.viewport.attach(scrollView)
+        context.coordinator.viewport.update(
+            canvasSize: contentSize,
+            focusPoint: CGPoint(
+                x: metrics.centerX,
+                y: (metrics.plotTop + metrics.plotBottom) / 2
+            )
+        )
         return scrollView
     }
 
@@ -1600,13 +1630,19 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
         if centerResetDidChange {
             context.coordinator.centerResetToken = centerResetToken
-            context.coordinator.didCenterInitialPosition = false
         }
 
         context.coordinator.zoomScale = $zoomScale
         context.coordinator.entries = entries
         context.coordinator.allowsDragging = allowsDragging
         context.coordinator.contentSize = contentSize
+        context.coordinator.viewport.update(
+            canvasSize: contentSize,
+            focusPoint: CGPoint(
+                x: metrics.centerX,
+                y: (metrics.plotTop + metrics.plotBottom) / 2
+            )
+        )
         if sizeDidChange {
             scrollView.contentSize = contentSize
             context.coordinator.canvasView?.frame = CGRect(origin: .zero, size: contentSize)
@@ -1614,8 +1650,8 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         if contentDidChange || sizeDidChange {
             context.coordinator.canvasView?.configure(metrics: metrics, entries: entries, contentSize: contentSize)
-            if !centerResetDidChange {
-                context.coordinator.clampContentOffset()
+            if !contentDidChange && !centerResetDidChange {
+                context.coordinator.viewport.clampContentOffset()
             }
         }
         context.coordinator.canvasView?.updateDragState(
@@ -1624,10 +1660,10 @@ private struct ZoomableLadderView: UIViewRepresentable {
             isOverDeleteTarget: isOverDeleteTarget
         )
 
-        let targetZoomScale = centerResetDidChange ? CollectionView.defaultLadderScale : zoomScale
-        if !context.coordinator.isZooming,
-           abs(scrollView.zoomScale - targetZoomScale) > 0.001 {
-            scrollView.setZoomScale(targetZoomScale, animated: false)
+        if !centerResetDidChange,
+           !context.coordinator.isZooming,
+           abs(scrollView.zoomScale - zoomScale) > 0.001 {
+            scrollView.setZoomScale(zoomScale, animated: false)
         }
         context.coordinator.canvasView?.applyZoom(
             scale: scrollView.zoomScale,
@@ -1637,9 +1673,8 @@ private struct ZoomableLadderView: UIViewRepresentable {
         if !context.coordinator.isZooming || contentDidChange || sizeDidChange {
             scrollView.layoutIfNeeded()
         }
-        context.coordinator.centerInitialPositionIfNeeded()
-        if centerResetDidChange || sizeDidChange {
-            context.coordinator.scheduleDeferredCentering()
+        if contentDidChange || centerResetDidChange || sizeDidChange {
+            context.coordinator.viewport.requestReset(zoomScale: CollectionView.initialLadderScale)
         }
     }
 
@@ -1652,8 +1687,8 @@ private struct ZoomableLadderView: UIViewRepresentable {
         let onDragEnded: (LadderDrinkDisplayItem?, Bool) -> Void
         weak var canvasView: LadderCanvasUIView?
         weak var scrollView: UIScrollView?
+        let viewport = ZoomCanvasViewportController()
         var isZooming = false
-        var didCenterInitialPosition = false
         var contentSize: CGSize = .zero
         var contentSignature = ""
         var centerResetToken = 0
@@ -1679,6 +1714,10 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             canvasView
+        }
+
+        func handleScrollViewLayout() {
+            viewport.handleLayout()
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -1806,20 +1845,27 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
             isZooming = true
+            viewport.cancelPendingReset()
             let now = CACurrentMediaTime()
             lastZoomInteractionAt = now
             lastReportedZoomScale = scrollView.zoomScale
             canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .preview)
         }
 
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            viewport.cancelPendingReset()
+        }
+
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             lastZoomInteractionAt = CACurrentMediaTime()
+            viewport.updateContentInsets()
             canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .preview)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             isZooming = false
             lastZoomInteractionAt = CACurrentMediaTime()
+            viewport.updateContentInsets()
             canvasView?.applyZoom(scale: scale, mode: .settled, animatesLabel: true)
             reportZoomScale(scale)
             lastReportedZoomScale = scale
@@ -1842,51 +1888,6 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         private func isDrinkGesture(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer
-        }
-
-        func centerInitialPositionIfNeeded() {
-            guard !didCenterInitialPosition else { return }
-            centerLadder()
-        }
-
-        func scheduleDeferredCentering() {
-            DispatchQueue.main.async { [weak self] in
-                self?.centerLadder()
-            }
-        }
-
-        func clampContentOffset() {
-            guard let scrollView else { return }
-            let maxX = max(-scrollView.adjustedContentInset.left, scrollView.contentSize.width - scrollView.bounds.width + scrollView.adjustedContentInset.right)
-            let maxY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
-            let minX = -scrollView.adjustedContentInset.left
-            let minY = -scrollView.adjustedContentInset.top
-            let clamped = CGPoint(
-                x: min(max(scrollView.contentOffset.x, minX), maxX),
-                y: min(max(scrollView.contentOffset.y, minY), maxY)
-            )
-            guard clamped != scrollView.contentOffset else { return }
-            scrollView.setContentOffset(clamped, animated: false)
-        }
-
-        private func centerLadder() {
-            guard let scrollView,
-                  scrollView.bounds.width > 0,
-                  scrollView.bounds.height > 0,
-                  contentSize.width > 0,
-                  contentSize.height > 0 else {
-                return
-            }
-
-            scrollView.layoutIfNeeded()
-            let scaledWidth = contentSize.width * scrollView.zoomScale
-            let scaledHeight = contentSize.height * scrollView.zoomScale
-            let targetX = max(0, (scaledWidth - scrollView.bounds.width) / 2)
-            let targetY = max(0, (scaledHeight - scrollView.bounds.height) / 2)
-            scrollView.setContentOffset(CGPoint(x: targetX, y: targetY), animated: false)
-            lastReportedZoomScale = scrollView.zoomScale
-            didCenterInitialPosition = true
-            canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .settled)
         }
     }
 }
@@ -1959,10 +1960,10 @@ private struct LadderMetrics {
     let sideLaneWidth: CGFloat
     let axisLineGap: CGFloat
 
-    init(size: CGSize, topClearance: CGFloat = 30) {
+    init(size: CGSize, topClearance: CGFloat = 30, bottomClearance: CGFloat = 34) {
         self.size = size
         plotTop = topClearance
-        plotBottom = max(plotTop + 720, size.height - 34)
+        plotBottom = max(plotTop + 720, size.height - bottomClearance)
         centerX = size.width / 2
         sideLaneWidth = max(340, size.width / 2 - 48)
         axisLineGap = 34

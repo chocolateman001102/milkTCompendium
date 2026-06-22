@@ -28,6 +28,7 @@
 		A10000000000000000000017 /* CompendiumComparisonModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* CompendiumComparisonModels.swift */; };
 		A10000000000000000000018 /* CompendiumComparisonView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* CompendiumComparisonView.swift */; };
 		A10000000000000000000019 /* KeyboardDismissal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000019 /* KeyboardDismissal.swift */; };
+		A1000000000000000000001A /* ZoomCanvasViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* ZoomCanvasViewport.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -55,6 +56,7 @@
 		A20000000000000000000017 /* CompendiumComparisonModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompendiumComparisonModels.swift; sourceTree = "<group>"; };
 		A20000000000000000000018 /* CompendiumComparisonView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompendiumComparisonView.swift; sourceTree = "<group>"; };
 		A20000000000000000000019 /* KeyboardDismissal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardDismissal.swift; sourceTree = "<group>"; };
+		A2000000000000000000001A /* ZoomCanvasViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZoomCanvasViewport.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -97,6 +99,7 @@
 				A20000000000000000000017 /* CompendiumComparisonModels.swift */,
 				A20000000000000000000018 /* CompendiumComparisonView.swift */,
 				A20000000000000000000019 /* KeyboardDismissal.swift */,
+				A2000000000000000000001A /* ZoomCanvasViewport.swift */,
 				A2000000000000000000000A /* CameraPicker.swift */,
 				A20000000000000000000013 /* Info.plist */,
 				A2000000000000000000000B /* Assets.xcassets */,
@@ -202,6 +205,7 @@
 				A10000000000000000000017 /* CompendiumComparisonModels.swift in Sources */,
 				A10000000000000000000018 /* CompendiumComparisonView.swift in Sources */,
 				A10000000000000000000019 /* KeyboardDismissal.swift in Sources */,
+				A1000000000000000000001A /* ZoomCanvasViewport.swift in Sources */,
 				A1000000000000000000000A /* CameraPicker.swift in Sources */,
 				A1000000000000000000000D /* BrandStore.swift in Sources */,
 			);
