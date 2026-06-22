@@ -75,6 +75,7 @@ struct ContentView: View {
         .onOpenURL { url in
             importSharedCompendium(from: url)
         }
+        .dismissKeyboardOnTap()
     }
 
     private func startCamera() {

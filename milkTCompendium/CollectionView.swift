@@ -31,7 +31,9 @@ struct CollectionView: View {
     @Query(sort: \Drink.createdAt, order: .reverse) private var drinks: [Drink]
     @ObservedObject var sharedStore: SharedCompendiumStore
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
+    @AppStorage("NearbyTransferDisplayName") private var savedDisplayName = NearbyDisplayNameStore.displayName
     @State private var selectedCompendiumID = "mine"
+    @State private var comparisonOwnerID: String?
     @State private var showingTransfer = false
     @State private var draggingItem: LadderDrinkDisplayItem?
     @State private var dragTranslation: CGSize = .zero
@@ -39,9 +41,11 @@ struct CollectionView: View {
     @State private var selectedItem: LadderDrinkDisplayItem?
     @State private var editingDrink: Drink?
     @State private var ladderScale: CGFloat = Self.defaultLadderScale
+    @State private var ladderCenterResetToken = 0
     @State private var searchText = ""
     @State private var selectedBrandFilter: String?
-    @State private var selectedRatingBand: LadderRatingBand = .all
+    @State private var selectedRatingLowerBound = 0.0
+    @State private var selectedRatingUpperBound = 5.0
     @State private var isFilterPanelExpanded = false
     @StateObject private var derivedDataCache = CollectionDerivedDataCache()
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
@@ -66,6 +70,11 @@ struct CollectionView: View {
 
     private var activeSharedCompendium: SharedCompendium? {
         sharedStore.compendiums.first { $0.id == selectedCompendiumID }
+    }
+
+    private var comparisonCompendium: SharedCompendium? {
+        guard let comparisonOwnerID else { return nil }
+        return sharedStore.compendiums.first { $0.ownerID == comparisonOwnerID }
     }
 
     private var displayItems: [LadderDrinkDisplayItem] {
@@ -132,7 +141,7 @@ struct CollectionView: View {
             selectedCompendiumID,
             normalizedSearchText,
             selectedBrandFilter ?? "*",
-            selectedRatingBand.id
+            String(format: "%.1f-%.1f", selectedRatingLowerBound, selectedRatingUpperBound)
         ].joined(separator: "#")
         let itemKey = items.map { item in
             [
@@ -169,7 +178,8 @@ struct CollectionView: View {
     private var hasActiveFilter: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || selectedBrandFilter != nil
-            || selectedRatingBand != .all
+            || selectedRatingLowerBound > 0
+            || selectedRatingUpperBound < 5
     }
 
     var body: some View {
@@ -198,12 +208,14 @@ struct CollectionView: View {
             LadderTopDock(
                 searchText: $searchText,
                 selectedBrand: $selectedBrandFilter,
-                selectedRatingBand: $selectedRatingBand,
+                selectedRatingLowerBound: $selectedRatingLowerBound,
+                selectedRatingUpperBound: $selectedRatingUpperBound,
                 isFilterPanelExpanded: $isFilterPanelExpanded,
                 isShowingMine: isShowingMine,
                 selectedCompendiumID: selectedCompendiumID,
                 currentCompendiumTitle: currentCompendiumTitle,
                 currentCompendiumSubtitle: currentCompactSubtitle,
+                localProfileName: localProfileName,
                 sharedCompendiums: sharedStore.compendiums,
                 brandOptions: brandFilterOptions,
                 filteredCount: filteredDisplayItems.count,
@@ -211,6 +223,7 @@ struct CollectionView: View {
                 hasItems: !displayItems.isEmpty,
                 hasActiveFilter: hasActiveFilter,
                 onSwitchCompendium: switchCompendium,
+                onCompareCompendium: openComparison,
                 onOpenProfile: { showingTransfer = true },
                 onClear: clearFilters
             )
@@ -264,13 +277,35 @@ struct CollectionView: View {
                 DrinkFormView(mode: .edit(editingDrink)) {}
             }
         }
-        .sheet(isPresented: $showingTransfer) {
-            NearbyTransferView(drinks: drinks, sharedStore: sharedStore, tasteStatsStore: tasteStatsStore) { compendium in
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
-                    switchCompendium(to: compendium.id)
-                }
+        .navigationDestination(isPresented: comparisonBinding) {
+            if let comparisonCompendium {
+                CompendiumComparisonView(
+                    localDrinks: drinks,
+                    sharedCompendiums: sharedStore.compendiums,
+                    initialOwnerID: comparisonCompendium.ownerID,
+                    localOwnerName: localProfileName
+                )
             }
         }
+        .sheet(isPresented: $showingTransfer) {
+            NearbyTransferView(
+                drinks: drinks,
+                sharedStore: sharedStore,
+                tasteStatsStore: tasteStatsStore,
+                onImported: { compendium in
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
+                        switchCompendium(to: compendium.id)
+                    }
+                },
+                onCompare: { compendium in
+                    showingTransfer = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                        openComparison(compendium)
+                    }
+                }
+            )
+        }
+        .dismissKeyboardOnTap()
     }
 
     private var ratingLadder: some View {
@@ -294,6 +329,7 @@ struct CollectionView: View {
                 metrics: layout.metrics,
                 entries: layout.entries,
                 contentSignature: layout.contentSignature,
+                centerResetToken: ladderCenterResetToken,
                 allowsDragging: isShowingMine,
                 draggedItemID: draggingItem?.id,
                 dragTranslation: dragTranslation,
@@ -408,12 +444,16 @@ struct CollectionView: View {
         if let activeSharedCompendium, !isShowingMine {
             return activeSharedCompendium.ownerName
         }
-        return "我的"
+        return localProfileName
+    }
+
+    private var localProfileName: String {
+        NearbyDisplayNameStore.cleanDisplayName(savedDisplayName)
     }
 
     private var currentCompendiumSubtitle: String {
         if isShowingMine {
-            let cupCount = TasteScoreCalculator.effectiveCupCount(drinks: drinks)
+            let cupCount = TasteScoreCalculator.totalActualCupCount(drinks: drinks)
             let collectionCount = drinks.count
             return "\(tasteScore.levelName) · \(String(format: "%.2f", tasteScore.score)) · \(cupCount) 杯 · \(collectionCount) 项"
         }
@@ -458,7 +498,7 @@ struct CollectionView: View {
             return false
         }
 
-        guard selectedRatingBand.contains(item.rating) else {
+        guard item.rating >= selectedRatingLowerBound && item.rating <= selectedRatingUpperBound else {
             return false
         }
 
@@ -564,19 +604,30 @@ struct CollectionView: View {
 
     private func switchCompendium(to id: String) {
         guard selectedCompendiumID != id else { return }
+        comparisonOwnerID = nil
         selectedCompendiumID = id
         selectedItem = nil
         draggingItem = nil
         dragTranslation = .zero
         isOverDeleteTarget = false
         ladderScale = Self.defaultLadderScale
+        ladderCenterResetToken += 1
+    }
+
+    private func openComparison(_ compendium: SharedCompendium) {
+        selectedItem = nil
+        draggingItem = nil
+        dragTranslation = .zero
+        isOverDeleteTarget = false
+        comparisonOwnerID = compendium.ownerID
     }
 
     private func clearFilters() {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             searchText = ""
             selectedBrandFilter = nil
-            selectedRatingBand = .all
+            selectedRatingLowerBound = 0
+            selectedRatingUpperBound = 5
             isFilterPanelExpanded = false
         }
     }
@@ -585,6 +636,16 @@ struct CollectionView: View {
         guard let selectedBrandFilter else { return }
         if !brandFilterOptions.contains(selectedBrandFilter) {
             self.selectedBrandFilter = nil
+        }
+    }
+
+    private var comparisonBinding: Binding<Bool> {
+        Binding {
+            comparisonCompendium != nil
+        } set: { isPresented in
+            if !isPresented {
+                comparisonOwnerID = nil
+            }
         }
     }
 
@@ -639,7 +700,7 @@ struct CollectionView: View {
         let filterKey = [
             normalizedSearchText,
             selectedBrandFilter ?? "*",
-            selectedRatingBand.id
+            String(format: "%.1f-%.1f", selectedRatingLowerBound, selectedRatingUpperBound)
         ].joined(separator: "#")
         return "\(selectedCompendiumID):\(viewportKey):\(filterKey):\(itemKey)"
     }
@@ -1044,64 +1105,18 @@ struct CollectionView: View {
     }
 }
 
-private enum LadderRatingBand: String, CaseIterable, Identifiable, Equatable {
-    case all
-    case zeroToOne
-    case oneToTwo
-    case twoToThree
-    case threeToFour
-    case fourToFive
-
-    var id: String {
-        rawValue
-    }
-
-    var title: String {
-        switch self {
-        case .all:
-            return "全部分数"
-        case .zeroToOne:
-            return "0-1"
-        case .oneToTwo:
-            return "1-2"
-        case .twoToThree:
-            return "2-3"
-        case .threeToFour:
-            return "3-4"
-        case .fourToFive:
-            return "4-5"
-        }
-    }
-
-    func contains(_ rating: Double) -> Bool {
-        let clamped = min(5, max(0, rating))
-        switch self {
-        case .all:
-            return true
-        case .zeroToOne:
-            return clamped >= 0 && clamped < 1
-        case .oneToTwo:
-            return clamped >= 1 && clamped < 2
-        case .twoToThree:
-            return clamped >= 2 && clamped < 3
-        case .threeToFour:
-            return clamped >= 3 && clamped < 4
-        case .fourToFive:
-            return clamped >= 4 && clamped <= 5
-        }
-    }
-}
-
 private struct LadderTopDock: View {
     @Binding var searchText: String
     @Binding var selectedBrand: String?
-    @Binding var selectedRatingBand: LadderRatingBand
+    @Binding var selectedRatingLowerBound: Double
+    @Binding var selectedRatingUpperBound: Double
     @Binding var isFilterPanelExpanded: Bool
 
     let isShowingMine: Bool
     let selectedCompendiumID: String
     let currentCompendiumTitle: String
     let currentCompendiumSubtitle: String
+    let localProfileName: String
     let sharedCompendiums: [SharedCompendium]
     let brandOptions: [String]
     let filteredCount: Int
@@ -1109,61 +1124,74 @@ private struct LadderTopDock: View {
     let hasItems: Bool
     let hasActiveFilter: Bool
     let onSwitchCompendium: (String) -> Void
+    let onCompareCompendium: (SharedCompendium) -> Void
     let onOpenProfile: () -> Void
     let onClear: () -> Void
 
     var body: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 7) {
-                compendiumMenu
+            VStack(spacing: 7) {
+                HStack(spacing: 7) {
+                    compendiumMenu
+                    Spacer(minLength: 8)
 
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
-
-                TextField("搜索品牌、品名、口味", text: $searchText)
-                    .font(.caption.weight(.medium))
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-
-                if hasItems {
-                    Text("\(filteredCount)/\(totalCount)")
-                        .font(.caption2.weight(.bold).monospacedDigit())
-                        .foregroundStyle(hasActiveFilter ? .primary : .secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(Color.black.opacity(hasActiveFilter ? 0.09 : 0.045))
-                        .clipShape(Capsule())
-                }
-
-                Button {
-                    withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
-                        isFilterPanelExpanded.toggle()
+                    if !sharedCompendiums.isEmpty {
+                        compareMenu
                     }
-                } label: {
-                    dockIcon(
-                        systemName: "slider.horizontal.3",
-                        isActive: isFilterPanelExpanded || hasActiveFilter
-                    )
-                }
-                .disabled(!hasItems)
-                .buttonStyle(LeverControlButtonStyle())
 
-                if hasActiveFilter {
-                    Button(action: onClear) {
-                        dockIcon(systemName: "xmark", isActive: true)
+                    Button(action: onOpenProfile) {
+                        dockIcon(systemName: "dot.radiowaves.left.and.right", isActive: true)
                     }
                     .buttonStyle(LeverControlButtonStyle())
-                    .transition(.scale.combined(with: .opacity))
                 }
+                .frame(height: 34)
 
-                Button(action: onOpenProfile) {
-                    dockIcon(systemName: "dot.radiowaves.left.and.right", isActive: true)
+                HStack(spacing: 7) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.secondary)
+
+                    TextField("搜索品牌、品名、口味", text: $searchText)
+                        .font(.caption.weight(.medium))
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .submitLabel(.search)
+                        .frame(maxWidth: .infinity)
+
+                    if hasItems {
+                        Text("\(filteredCount)/\(totalCount)")
+                            .font(.caption2.weight(.bold).monospacedDigit())
+                            .foregroundStyle(hasActiveFilter ? .primary : .secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.black.opacity(hasActiveFilter ? 0.09 : 0.045))
+                            .clipShape(Capsule())
+                    }
+
+                    Button {
+                        withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
+                            isFilterPanelExpanded.toggle()
+                        }
+                    } label: {
+                        dockIcon(
+                            systemName: "slider.horizontal.3",
+                            isActive: isFilterPanelExpanded || hasActiveFilter
+                        )
+                    }
+                    .disabled(!hasItems)
+                    .buttonStyle(LeverControlButtonStyle())
+
+                    if hasActiveFilter {
+                        Button(action: onClear) {
+                            dockIcon(systemName: "xmark", isActive: true)
+                        }
+                        .buttonStyle(LeverControlButtonStyle())
+                        .transition(.scale.combined(with: .opacity))
+                    }
                 }
-                .buttonStyle(LeverControlButtonStyle())
+                .frame(height: 34)
             }
-            .padding(5)
+            .padding(6)
             .background(.white.opacity(0.96))
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
@@ -1187,18 +1215,18 @@ private struct LadderTopDock: View {
             Button {
                 onSwitchCompendium("mine")
             } label: {
-                Label("我的", systemImage: isShowingMine ? "checkmark" : "cup.and.saucer")
+                compendiumMenuTitle(localProfileName, isSelected: isShowingMine)
             }
 
             ForEach(sharedCompendiums) { compendium in
                 Button {
                     onSwitchCompendium(compendium.id)
                 } label: {
-                    Label(compendium.ownerName, systemImage: selectedCompendiumID == compendium.id ? "checkmark" : "book")
+                    compendiumMenuTitle(compendium.ownerName, isSelected: selectedCompendiumID == compendium.id)
                 }
             }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(currentCompendiumTitle)
                         .font(.caption.weight(.bold))
@@ -1209,18 +1237,68 @@ private struct LadderTopDock: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                .frame(maxWidth: 82, alignment: .leading)
+                .frame(minWidth: 58, maxWidth: 118, alignment: .leading)
 
                 Image(systemName: "chevron.down")
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 9)
+            .padding(.leading, 10)
+            .padding(.trailing, 7)
             .padding(.vertical, 6)
             .background(Color.black.opacity(0.045))
             .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
         }
         .buttonStyle(.plain)
+    }
+
+    private func compendiumMenuTitle(_ title: String, isSelected: Bool) -> some View {
+        HStack(spacing: 8) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(isSelected ? Color.black : Color.clear)
+                .frame(width: 3, height: 16)
+            Text(title)
+                .fontWeight(isSelected ? .bold : .regular)
+        }
+    }
+
+    @ViewBuilder
+    private var compareMenu: some View {
+        if sharedCompendiums.count == 1, let compendium = sharedCompendiums.first {
+            Button {
+                onCompareCompendium(compendium)
+            } label: {
+                compareChip
+            }
+            .buttonStyle(LeverControlButtonStyle())
+        } else {
+            Menu {
+                ForEach(sharedCompendiums) { compendium in
+                    Button {
+                        onCompareCompendium(compendium)
+                    } label: {
+                        Label(compendium.ownerName, systemImage: "person.2")
+                    }
+                }
+            } label: {
+                compareChip
+            }
+            .buttonStyle(LeverControlButtonStyle())
+        }
+    }
+
+    private var compareChip: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "rectangle.split.2x1")
+                .font(.system(size: 11, weight: .black))
+            Text("共饮")
+                .font(.system(size: 11, weight: .black, design: .rounded))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .frame(height: 32)
+        .background(Color.black.opacity(0.9))
+        .clipShape(Capsule())
     }
 
     private var filterPanel: some View {
@@ -1247,21 +1325,10 @@ private struct LadderTopDock: View {
             }
             .buttonStyle(.plain)
 
-            Menu {
-                ForEach(LadderRatingBand.allCases) { band in
-                    Button {
-                        selectedRatingBand = band
-                    } label: {
-                        filterMenuTitle(band.title, isSelected: selectedRatingBand == band)
-                    }
-                }
-            } label: {
-                filterChip(
-                    title: selectedRatingBand.title,
-                    isActive: selectedRatingBand != .all
-                )
-            }
-            .buttonStyle(.plain)
+            RatingRangeRuler(
+                lowerBound: $selectedRatingLowerBound,
+                upperBound: $selectedRatingUpperBound
+            )
 
             Spacer(minLength: 0)
         }
@@ -1279,9 +1346,9 @@ private struct LadderTopDock: View {
         Image(systemName: systemName)
             .font(.system(size: 13, weight: .bold))
             .foregroundStyle(isActive ? .white : .primary)
-            .frame(width: 30, height: 30)
+            .frame(width: 32, height: 32)
             .background(isActive ? Color.black.opacity(0.9) : Color.black.opacity(0.055))
-            .clipShape(Capsule())
+            .clipShape(Circle())
     }
 
     private func filterMenuTitle(_ title: String, isSelected: Bool) -> some View {
@@ -1309,6 +1376,109 @@ private struct LadderTopDock: View {
         .padding(.vertical, 7)
         .background(isActive ? Color.black.opacity(0.88) : Color.black.opacity(0.06))
         .clipShape(Capsule())
+    }
+}
+
+private struct RatingRangeRuler: View {
+    @Binding var lowerBound: Double
+    @Binding var upperBound: Double
+
+    private let markCount = 5
+    private let handleSize: CGFloat = 24
+    private let trackHeight: CGFloat = 4
+
+    var body: some View {
+        GeometryReader { proxy in
+                let width = max(1, proxy.size.width)
+                let usableWidth = max(1, width - handleSize)
+                let lowerX = xPosition(for: lowerBound, usableWidth: usableWidth)
+                let upperX = xPosition(for: upperBound, usableWidth: usableWidth)
+                let centerY = proxy.size.height / 2
+
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.black.opacity(0.08))
+                        .frame(height: trackHeight)
+                        .position(x: width / 2, y: centerY)
+
+                    Capsule()
+                        .fill(Color.black.opacity(0.78))
+                        .frame(width: max(trackHeight, upperX - lowerX), height: trackHeight)
+                        .position(x: (lowerX + upperX) / 2, y: centerY)
+
+                    ForEach(0...markCount, id: \.self) { mark in
+                        let markX = xPosition(for: Double(mark), usableWidth: usableWidth)
+                        VStack(spacing: 2) {
+                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                .fill(Color.black.opacity(0.36))
+                                .frame(width: 2, height: mark == 0 || mark == markCount ? 10 : 7)
+                            Text("\(mark)")
+                                .font(.system(size: 8, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        }
+                        .position(x: markX, y: centerY + 13)
+                    }
+
+                    rangeHandle(isLower: true)
+                        .position(x: lowerX, y: centerY)
+                        .gesture(dragGesture(isLower: true, usableWidth: usableWidth))
+
+                    rangeHandle(isLower: false)
+                        .position(x: upperX, y: centerY)
+                        .gesture(dragGesture(isLower: false, usableWidth: usableWidth))
+                }
+            }
+            .frame(height: 36)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .frame(width: 146)
+        .background(Color.black.opacity(isActive ? 0.08 : 0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var title: String {
+        if !isActive { return "全部分数" }
+        return String(format: "%.0f-%.0f 分", lowerBound, upperBound)
+    }
+
+    private var isActive: Bool {
+        lowerBound > 0 || upperBound < 5
+    }
+
+    private func xPosition(for value: Double, usableWidth: CGFloat) -> CGFloat {
+        handleSize / 2 + CGFloat(min(5, max(0, value)) / 5) * usableWidth
+    }
+
+    private func value(for locationX: CGFloat, usableWidth: CGFloat) -> Double {
+        let progress = min(1, max(0, (locationX - handleSize / 2) / usableWidth))
+        return (Double(progress) * 5).rounded()
+    }
+
+    private func rangeHandle(isLower: Bool) -> some View {
+        ZStack {
+            Circle()
+                .fill(.white)
+            Circle()
+                .stroke(Color.black.opacity(0.82), lineWidth: 2)
+            Image(systemName: isLower ? "chevron.left" : "chevron.right")
+                .font(.system(size: 8, weight: .black))
+                .foregroundStyle(.black.opacity(0.72))
+        }
+        .frame(width: handleSize, height: handleSize)
+        .shadow(color: .black.opacity(0.16), radius: 6, y: 3)
+        .accessibilityLabel(isLower ? "最低分" : "最高分")
+    }
+
+    private func dragGesture(isLower: Bool, usableWidth: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let next = self.value(for: value.location.x, usableWidth: usableWidth)
+                if isLower {
+                    lowerBound = min(next, upperBound)
+                } else {
+                    upperBound = max(next, lowerBound)
+                }
+            }
     }
 }
 
@@ -1356,6 +1526,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
     let metrics: LadderMetrics
     let entries: [LadderDrinkEntry]
     let contentSignature: String
+    let centerResetToken: Int
     let allowsDragging: Bool
     let draggedItemID: String?
     let dragTranslation: CGSize
@@ -1423,8 +1594,12 @@ private struct ZoomableLadderView: UIViewRepresentable {
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         let contentDidChange = context.coordinator.contentSignature != contentSignature
         let sizeDidChange = context.coordinator.contentSize != contentSize
+        let centerResetDidChange = context.coordinator.centerResetToken != centerResetToken
         if contentDidChange {
             context.coordinator.contentSignature = contentSignature
+        }
+        if centerResetDidChange {
+            context.coordinator.centerResetToken = centerResetToken
             context.coordinator.didCenterInitialPosition = false
         }
 
@@ -1439,6 +1614,9 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         if contentDidChange || sizeDidChange {
             context.coordinator.canvasView?.configure(metrics: metrics, entries: entries, contentSize: contentSize)
+            if !centerResetDidChange {
+                context.coordinator.clampContentOffset()
+            }
         }
         context.coordinator.canvasView?.updateDragState(
             draggedItemID: draggedItemID,
@@ -1446,9 +1624,10 @@ private struct ZoomableLadderView: UIViewRepresentable {
             isOverDeleteTarget: isOverDeleteTarget
         )
 
+        let targetZoomScale = centerResetDidChange ? CollectionView.defaultLadderScale : zoomScale
         if !context.coordinator.isZooming,
-           abs(scrollView.zoomScale - zoomScale) > 0.001 {
-            scrollView.setZoomScale(zoomScale, animated: false)
+           abs(scrollView.zoomScale - targetZoomScale) > 0.001 {
+            scrollView.setZoomScale(targetZoomScale, animated: false)
         }
         context.coordinator.canvasView?.applyZoom(
             scale: scrollView.zoomScale,
@@ -1459,6 +1638,9 @@ private struct ZoomableLadderView: UIViewRepresentable {
             scrollView.layoutIfNeeded()
         }
         context.coordinator.centerInitialPositionIfNeeded()
+        if centerResetDidChange || sizeDidChange {
+            context.coordinator.scheduleDeferredCentering()
+        }
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
@@ -1474,6 +1656,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
         var didCenterInitialPosition = false
         var contentSize: CGSize = .zero
         var contentSignature = ""
+        var centerResetToken = 0
         var lastReportedZoomScale: CGFloat = 0
         var longPressedItem: LadderDrinkDisplayItem?
         var longPressStartContentPoint: CGPoint = .zero
@@ -1662,8 +1845,32 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func centerInitialPositionIfNeeded() {
-            guard !didCenterInitialPosition,
-                  let scrollView,
+            guard !didCenterInitialPosition else { return }
+            centerLadder()
+        }
+
+        func scheduleDeferredCentering() {
+            DispatchQueue.main.async { [weak self] in
+                self?.centerLadder()
+            }
+        }
+
+        func clampContentOffset() {
+            guard let scrollView else { return }
+            let maxX = max(-scrollView.adjustedContentInset.left, scrollView.contentSize.width - scrollView.bounds.width + scrollView.adjustedContentInset.right)
+            let maxY = max(-scrollView.adjustedContentInset.top, scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom)
+            let minX = -scrollView.adjustedContentInset.left
+            let minY = -scrollView.adjustedContentInset.top
+            let clamped = CGPoint(
+                x: min(max(scrollView.contentOffset.x, minX), maxX),
+                y: min(max(scrollView.contentOffset.y, minY), maxY)
+            )
+            guard clamped != scrollView.contentOffset else { return }
+            scrollView.setContentOffset(clamped, animated: false)
+        }
+
+        private func centerLadder() {
+            guard let scrollView,
                   scrollView.bounds.width > 0,
                   scrollView.bounds.height > 0,
                   contentSize.width > 0,
@@ -2043,6 +2250,8 @@ private final class LadderNodeLayer: CALayer {
         stickerLayer.frame = badgeLayer.bounds.insetBy(dx: 5, dy: 5)
         stickerLayer.contentsGravity = .resizeAspect
         stickerLayer.contentsScale = UIScreen.main.scale
+        stickerLayer.minificationFilter = .trilinear
+        stickerLayer.magnificationFilter = .linear
         stickerLayer.contents = stickerContents()
         badgeLayer.addSublayer(stickerLayer)
 
@@ -2119,7 +2328,7 @@ private final class LadderNodeLayer: CALayer {
     }
 
     private func stickerContents() -> CGImage? {
-        if let cgImage = entry.item.stickerThumbnailImage?.cgImage {
+        if let cgImage = entry.item.stickerRenderImage?.cgImage {
             return cgImage
         }
         guard let image = UIImage(systemName: "cup.and.saucer.fill")?

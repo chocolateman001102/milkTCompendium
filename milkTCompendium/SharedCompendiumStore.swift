@@ -223,6 +223,11 @@ final class SharedCompendiumStore: ObservableObject {
     nonisolated private static let maxTotalStickerByteCount = 80 * 1024 * 1024
     nonisolated private static let maxStickerPixelDimension = 2_000
 
+    nonisolated private struct StoredCompendium {
+        let directory: URL
+        let compendium: SharedCompendium
+    }
+
     nonisolated private static var rootDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let url = base.appendingPathComponent("SharedCompendiums", isDirectory: true)
@@ -262,12 +267,38 @@ final class SharedCompendiumStore: ObservableObject {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        return ownerDirectories.compactMap { directory in
+        let storedCompendiums = ownerDirectories.compactMap { directory -> StoredCompendium? in
             let manifestURL = directory.appendingPathComponent(manifestName)
             guard let data = try? Data(contentsOf: manifestURL) else { return nil }
-            return try? decoder.decode(SharedCompendium.self, from: data)
+            guard let compendium = try? decoder.decode(SharedCompendium.self, from: data) else { return nil }
+            return StoredCompendium(directory: directory, compendium: compendium)
         }
+
+        return deduplicatedStoredCompendiums(storedCompendiums)
+            .map(\.compendium)
         .sorted { $0.exportedAt > $1.exportedAt }
+    }
+
+    nonisolated private static func deduplicatedStoredCompendiums(_ storedCompendiums: [StoredCompendium]) -> [StoredCompendium] {
+        var kept: [StoredCompendium] = []
+        for candidate in storedCompendiums.sorted(by: { $0.compendium.exportedAt > $1.compendium.exportedAt }) {
+            let candidateName = normalizedOwnerName(candidate.compendium.ownerName)
+            let isDuplicate = kept.contains { existing in
+                existing.compendium.ownerID == candidate.compendium.ownerID
+                    || (
+                        !candidateName.isEmpty
+                            && normalizedOwnerName(existing.compendium.ownerName) == candidateName
+                            && likelySameCompendium(existing.compendium.drinks, candidate.compendium.drinks)
+                    )
+            }
+
+            if isDuplicate {
+                try? FileManager.default.removeItem(at: candidate.directory)
+            } else {
+                kept.append(candidate)
+            }
+        }
+        return kept
     }
 
     func importArchive(at url: URL) async throws -> SharedCompendium {
@@ -343,6 +374,9 @@ final class SharedCompendiumStore: ObservableObject {
             let manifestData = try encoder.encode(compendium)
             try manifestData.write(to: temporaryDirectory.appendingPathComponent(manifestName), options: .atomic)
 
+            for duplicateDirectory in duplicateOwnerDirectories(for: archive, replacing: ownerDirectory) {
+                try? FileManager.default.removeItem(at: duplicateDirectory)
+            }
             if FileManager.default.fileExists(atPath: ownerDirectory.path) {
                 try FileManager.default.removeItem(at: ownerDirectory)
             }
@@ -352,6 +386,104 @@ final class SharedCompendiumStore: ObservableObject {
             try? FileManager.default.removeItem(at: temporaryDirectory)
             throw error
         }
+    }
+
+    nonisolated private static func duplicateOwnerDirectories(
+        for archive: SharedCompendiumArchive,
+        replacing ownerDirectory: URL
+    ) -> [URL] {
+        let root = rootDirectory
+        guard let ownerDirectories = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let incomingName = normalizedOwnerName(archive.ownerName)
+        guard !incomingName.isEmpty else { return [] }
+
+        return ownerDirectories.compactMap { directory in
+            guard directory.path != ownerDirectory.path else { return nil }
+            let manifestURL = directory.appendingPathComponent(manifestName)
+            guard let data = try? Data(contentsOf: manifestURL),
+                  let existing = try? decoder.decode(SharedCompendium.self, from: data),
+                  existing.ownerID != archive.ownerID,
+                  normalizedOwnerName(existing.ownerName) == incomingName,
+                  likelySameCompendium(existing.drinks, archive.drinks) else {
+                return nil
+            }
+            return directory
+        }
+    }
+
+    nonisolated private static func normalizedOwnerName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { !$0.isWhitespace }
+    }
+
+    nonisolated private static func likelySameCompendium(
+        _ existingDrinks: [SharedDrink],
+        _ incomingDrinks: [SharedDrinkArchive]
+    ) -> Bool {
+        likelySameProductKeySet(
+            existingDrinks.compactMap { drink in
+                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
+                return key.isEmpty ? nil : key
+            },
+            incomingDrinks.compactMap { drink in
+                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
+                return key.isEmpty ? nil : key
+            }
+        )
+    }
+
+    nonisolated private static func likelySameCompendium(
+        _ existingDrinks: [SharedDrink],
+        _ incomingDrinks: [SharedDrink]
+    ) -> Bool {
+        likelySameProductKeySet(
+            existingDrinks.compactMap { drink in
+                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
+                return key.isEmpty ? nil : key
+            },
+            incomingDrinks.compactMap { drink in
+                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
+                return key.isEmpty ? nil : key
+            }
+        )
+    }
+
+    nonisolated private static func likelySameProductKeySet(_ firstKeys: [String], _ secondKeys: [String]) -> Bool {
+        let firstKeys = Set(firstKeys)
+        let secondKeys = Set(secondKeys)
+        guard !firstKeys.isEmpty, !secondKeys.isEmpty else { return false }
+
+        let overlap = firstKeys.intersection(secondKeys).count
+        let smallerCount = min(firstKeys.count, secondKeys.count)
+        return Double(overlap) / Double(smallerCount) >= 0.45
+    }
+
+    nonisolated private static func normalizedProductKey(brand: String, name: String) -> String {
+        let normalizedBrand = normalizedProductText(brand)
+        let normalizedName = normalizedProductText(name)
+        guard !normalizedBrand.isEmpty || !normalizedName.isEmpty else { return "" }
+        return "\(normalizedBrand)#\(normalizedName)"
+    }
+
+    nonisolated private static func normalizedProductText(_ text: String) -> String {
+        let skippedCharacters = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        let scalars = text
+            .lowercased()
+            .unicodeScalars
+            .filter { !skippedCharacters.contains($0) }
+        return String(String.UnicodeScalarView(scalars))
     }
 
     static func exportSnapshots(from drinks: [Drink]) -> [DrinkExportSnapshot] {
@@ -428,14 +560,14 @@ final class SharedCompendiumStore: ObservableObject {
 
     nonisolated private static func exportStickerData(_ name: String?) -> (data: Data, format: String, width: Int, height: Int)? {
         guard let image = ImageStore.load(name),
-              let resized = image.resizedForSharing(maxPixel: 360).cgImage else {
+              let resized = image.resizedForSharing(maxPixel: 720).cgImage else {
             return nil
         }
 
-        if let webP = encode(cgImage: resized, type: "org.webmproject.webp", quality: 0.78) {
+        if let webP = encode(cgImage: resized, type: "org.webmproject.webp", quality: 0.88) {
             return (webP, "webp", resized.width, resized.height)
         }
-        if let heic = encode(cgImage: resized, type: UTType.heic.identifier, quality: 0.78) {
+        if let heic = encode(cgImage: resized, type: UTType.heic.identifier, quality: 0.88) {
             return (heic, "heic", resized.width, resized.height)
         }
         if let png = encode(cgImage: resized, type: UTType.png.identifier, quality: 1) {
@@ -518,6 +650,10 @@ final class SharedCompendiumStore: ObservableObject {
         let key = "SharedCompendiumLocalOwnerID"
         if let existing = UserDefaults.standard.string(forKey: key) {
             return existing
+        }
+        if let legacyPeerID = UserDefaults.standard.string(forKey: "NearbyTransferStablePeerID") {
+            UserDefaults.standard.set(legacyPeerID, forKey: key)
+            return legacyPeerID
         }
         let newID = UUID().uuidString
         UserDefaults.standard.set(newID, forKey: key)

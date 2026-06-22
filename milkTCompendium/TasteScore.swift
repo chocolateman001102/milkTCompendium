@@ -33,12 +33,62 @@ struct TastePeerSnapshot: Codable, Identifiable {
     var ownerID: String
     var ownerName: String
     var drinkCount: Int
+    var effectiveDrinkCount: Int
     var averageRating: Double
     var lastExchangedAt: Date
     var profile: [TasteProfileDrink]
 
+    enum CodingKeys: String, CodingKey {
+        case ownerID
+        case ownerName
+        case drinkCount
+        case effectiveDrinkCount
+        case averageRating
+        case lastExchangedAt
+        case profile
+    }
+
     var id: String {
         ownerID
+    }
+
+    init(
+        ownerID: String,
+        ownerName: String,
+        drinkCount: Int,
+        effectiveDrinkCount: Int,
+        averageRating: Double,
+        lastExchangedAt: Date,
+        profile: [TasteProfileDrink]
+    ) {
+        self.ownerID = ownerID
+        self.ownerName = ownerName
+        self.drinkCount = max(0, drinkCount)
+        self.effectiveDrinkCount = max(0, effectiveDrinkCount)
+        self.averageRating = averageRating
+        self.lastExchangedAt = lastExchangedAt
+        self.profile = profile
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ownerID = try container.decode(String.self, forKey: .ownerID)
+        ownerName = try container.decode(String.self, forKey: .ownerName)
+        let decodedProfile = try container.decodeIfPresent([TasteProfileDrink].self, forKey: .profile) ?? []
+        profile = decodedProfile
+        let decodedDrinkCount = try container.decode(Int.self, forKey: .drinkCount)
+        if !decodedProfile.isEmpty {
+            drinkCount = TasteScoreCalculator.totalActualCupCount(profile: decodedProfile)
+            effectiveDrinkCount = TasteScoreCalculator.effectiveCupCount(profile: decodedProfile)
+        } else {
+            drinkCount = max(0, decodedDrinkCount)
+            effectiveDrinkCount = max(
+                0,
+                try container.decodeIfPresent(Int.self, forKey: .effectiveDrinkCount) ?? decodedDrinkCount
+            )
+        }
+        averageRating = try container.decode(Double.self, forKey: .averageRating)
+        lastExchangedAt = try container.decode(Date.self, forKey: .lastExchangedAt)
     }
 }
 
@@ -104,32 +154,71 @@ final class TasteExchangeStatsStore: ObservableObject {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         stats = (try? decoder.decode(TasteExchangeStats.self, from: data)) ?? .empty
+        normalizePeerSnapshots()
     }
 
     func recordSuccessfulExchange(
         ownerID: String,
         ownerName: String,
         drinkCount: Int,
+        effectiveDrinkCount: Int,
         averageRating: Double,
         profile: [TasteProfileDrink]? = nil
     ) {
         guard !ownerID.isEmpty else { return }
 
-        stats.successfulExchangeCount += 1
         let existingProfile = stats.peers.first { $0.ownerID == ownerID }?.profile ?? []
+        let incomingProfile = profile ?? existingProfile
         let snapshot = TastePeerSnapshot(
             ownerID: ownerID,
             ownerName: ownerName,
             drinkCount: max(0, drinkCount),
+            effectiveDrinkCount: max(0, effectiveDrinkCount),
             averageRating: averageRating,
             lastExchangedAt: .now,
-            profile: profile ?? existingProfile
+            profile: incomingProfile
         )
 
-        stats.peers.removeAll { $0.ownerID == ownerID }
+        let incomingName = Self.normalizedOwnerName(ownerName)
+        stats.peers.removeAll { peer in
+            peer.ownerID == ownerID
+                || (
+                    !incomingName.isEmpty
+                        && Self.normalizedOwnerName(peer.ownerName) == incomingName
+                        && Self.likelySameProfile(peer.profile, incomingProfile)
+                )
+        }
         stats.peers.append(snapshot)
         stats.peers.sort { $0.lastExchangedAt > $1.lastExchangedAt }
+        stats.successfulExchangeCount = stats.peers.count
         save()
+    }
+
+    private func normalizePeerSnapshots() {
+        let originalPeerCount = stats.peers.count
+        let originalExchangeCount = stats.successfulExchangeCount
+        var normalizedPeers: [TastePeerSnapshot] = []
+
+        for peer in stats.peers.sorted(by: { $0.lastExchangedAt > $1.lastExchangedAt }) {
+            let peerName = Self.normalizedOwnerName(peer.ownerName)
+            let isDuplicate = normalizedPeers.contains { existing in
+                existing.ownerID == peer.ownerID
+                    || (
+                        !peerName.isEmpty
+                            && Self.normalizedOwnerName(existing.ownerName) == peerName
+                            && Self.likelySameProfile(existing.profile, peer.profile)
+                    )
+            }
+            if !isDuplicate {
+                normalizedPeers.append(peer)
+            }
+        }
+
+        stats.peers = normalizedPeers
+        stats.successfulExchangeCount = normalizedPeers.count
+        if normalizedPeers.count != originalPeerCount || stats.successfulExchangeCount != originalExchangeCount {
+            save()
+        }
     }
 
     private func save() {
@@ -138,6 +227,46 @@ final class TasteExchangeStatsStore: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(stats) else { return }
         try? data.write(to: Self.fileURL, options: .atomic)
+    }
+
+    private static func normalizedOwnerName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .filter { !$0.isWhitespace }
+    }
+
+    private static func likelySameProfile(_ first: [TasteProfileDrink], _ second: [TasteProfileDrink]) -> Bool {
+        let firstKeys = Set(first.compactMap { drink in
+            let key = normalizedProductKey(brand: drink.brand, name: drink.name)
+            return key.isEmpty ? nil : key
+        })
+        let secondKeys = Set(second.compactMap { drink in
+            let key = normalizedProductKey(brand: drink.brand, name: drink.name)
+            return key.isEmpty ? nil : key
+        })
+        guard !firstKeys.isEmpty, !secondKeys.isEmpty else { return false }
+
+        let overlap = firstKeys.intersection(secondKeys).count
+        let smallerCount = min(firstKeys.count, secondKeys.count)
+        return Double(overlap) / Double(smallerCount) >= 0.45
+    }
+
+    private static func normalizedProductKey(brand: String, name: String) -> String {
+        let normalizedBrand = normalizedProductText(brand)
+        let normalizedName = normalizedProductText(name)
+        guard !normalizedBrand.isEmpty || !normalizedName.isEmpty else { return "" }
+        return "\(normalizedBrand)#\(normalizedName)"
+    }
+
+    private static func normalizedProductText(_ text: String) -> String {
+        let skippedCharacters = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        let scalars = text
+            .lowercased()
+            .unicodeScalars
+            .filter { !skippedCharacters.contains($0) }
+        return String(String.UnicodeScalarView(scalars))
     }
 }
 
@@ -156,10 +285,14 @@ enum TasteScoreCalculator {
     private static let authorityRatingCenter = 3.0
 
     static func calculate(localDrinks: [Drink], stats: TasteExchangeStats) -> TasteScoreResult {
-        let localProfile = localDrinks.map {
+        let localProfile = profile(from: localDrinks)
+        return calculate(localProfile: localProfile, stats: stats)
+    }
+
+    static func profile(from drinks: [Drink]) -> [TasteProfileDrink] {
+        drinks.map {
             TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating, cupCount: max(1, $0.cupCount))
         }
-        return calculate(localProfile: localProfile, stats: stats)
     }
 
     static func profile(from compendium: SharedCompendium) -> [TasteProfileDrink] {
@@ -189,8 +322,34 @@ enum TasteScoreCalculator {
         return profile.map(\.rating).reduce(0, +) / Double(profile.count)
     }
 
+    static func fuzzyUniqueProductCount(localDrinks: [Drink], peers: [TastePeerSnapshot]) -> Int {
+        fuzzyUniqueProductCount(profile: profile(from: localDrinks) + peers.flatMap(\.profile))
+    }
+
+    static func fuzzyUniqueProductCount(profile: [TasteProfileDrink]) -> Int {
+        var namesByBrand: [String: [String]] = [:]
+        var count = 0
+
+        for drink in profile {
+            let brand = normalizedProductText(drink.brand)
+            let name = normalizedProductText(drink.name)
+            guard !brand.isEmpty || !name.isEmpty else { continue }
+
+            let brandKey = brand.isEmpty ? "*" : brand
+            let existingNames = namesByBrand[brandKey, default: []]
+            if existingNames.contains(where: { fuzzySameProductName(name, $0) }) {
+                continue
+            }
+
+            namesByBrand[brandKey, default: []].append(name)
+            count += 1
+        }
+
+        return count
+    }
+
     private static func calculate(localProfile: [TasteProfileDrink], stats: TasteExchangeStats) -> TasteScoreResult {
-        let totalCupCount = effectiveCupCount(profile: localProfile) + stats.peers.map(\.drinkCount).reduce(0, +)
+        let totalCupCount = effectiveCupCount(profile: localProfile) + stats.peers.map(\.effectiveDrinkCount).reduce(0, +)
         let agreement = agreementScore(localProfile: localProfile, peers: stats.peers)
         let authorityComponent = authorityScore(localProfile: localProfile)
         let totalCupSignal = centeredLogSignal(value: totalCupCount, center: totalCupCenter, spread: totalCupLogSpread)
@@ -237,6 +396,52 @@ enum TasteScoreCalculator {
         guard spread > 0 else { return 0 }
         let signal = (value - center) / spread
         return clamp(signal, lower: -2.4, upper: 2.4)
+    }
+
+    private static func normalizedProductText(_ text: String) -> String {
+        let skippedCharacters = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        let scalars = text
+            .lowercased()
+            .unicodeScalars
+            .filter { !skippedCharacters.contains($0) }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    private static func fuzzySameProductName(_ first: String, _ second: String) -> Bool {
+        if first == second { return true }
+        guard !first.isEmpty, !second.isEmpty else { return false }
+
+        let firstCharacters = Array(first)
+        let secondCharacters = Array(second)
+        guard min(firstCharacters.count, secondCharacters.count) >= 3 else { return false }
+        let countDifference = abs(firstCharacters.count - secondCharacters.count)
+        guard countDifference <= 1 else { return false }
+
+        if firstCharacters.count == secondCharacters.count {
+            let mismatches = zip(firstCharacters, secondCharacters).filter { $0 != $1 }.count
+            return mismatches <= 1
+        }
+
+        let shorter = firstCharacters.count < secondCharacters.count ? firstCharacters : secondCharacters
+        let longer = firstCharacters.count < secondCharacters.count ? secondCharacters : firstCharacters
+        var shortIndex = 0
+        var longIndex = 0
+        var skipped = 0
+
+        while shortIndex < shorter.count, longIndex < longer.count {
+            if shorter[shortIndex] == longer[longIndex] {
+                shortIndex += 1
+                longIndex += 1
+            } else {
+                skipped += 1
+                guard skipped <= 1 else { return false }
+                longIndex += 1
+            }
+        }
+
+        return true
     }
 
     private static func componentValue(from signal: Double) -> Double {

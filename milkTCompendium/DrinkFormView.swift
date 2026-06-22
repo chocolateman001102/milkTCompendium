@@ -26,7 +26,6 @@ struct DrinkFormView: View {
     @State private var iceLevel = "正常冰"
     @State private var rating = 4.0
     @State private var consumedAt = Date()
-    @State private var location = ""
     @State private var note = ""
     @State private var isLimited = false
     @State private var cupCount = 1
@@ -60,7 +59,6 @@ struct DrinkFormView: View {
             _iceLevel = State(initialValue: drink.iceLevel)
             _rating = State(initialValue: drink.rating)
             _consumedAt = State(initialValue: drink.consumedAt)
-            _location = State(initialValue: drink.location)
             _note = State(initialValue: drink.note)
             _isLimited = State(initialValue: drink.isLimited)
             _cupCount = State(initialValue: max(1, drink.cupCount))
@@ -71,14 +69,13 @@ struct DrinkFormView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 18) {
-                ratingCard
-                photoCard
+            VStack(spacing: 10) {
+                mediaRatingCard
                 infoCard
                 saveButton
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
         .scrollDismissesKeyboard(.interactively)
         .contentShape(Rectangle())
@@ -127,7 +124,7 @@ struct DrinkFormView: View {
             }
         }
         .onChange(of: photoItem) { _, item in
-            guard !isEditing, let item else { return }
+            guard let item else { return }
             Task {
                 do {
                     guard let data = try await item.loadTransferable(type: Data.self) else {
@@ -178,121 +175,143 @@ struct DrinkFormView: View {
         }
     }
 
-    private var photoCard: some View {
-        VStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(.white)
+    private var mediaRatingCard: some View {
+        Card(title: "照片与评分") {
+            HStack(alignment: .top, spacing: 12) {
+                photoPreview
+                    .frame(width: 118, height: 118)
 
-                if let stickerImage {
-                    Button {
-                        showingStickerPreview = true
-                    } label: {
-                        ZStack(alignment: .bottomTrailing) {
-                            Image(uiImage: stickerImage)
-                                .resizable()
-                                .scaledToFit()
-                                .padding(18)
-
-                            Image(systemName: "plus.magnifyingglass")
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(.primary)
-                                .padding(10)
-                                .background(.white.opacity(0.92))
-                                .clipShape(Circle())
-                                .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
-                                .padding(14)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                } else if let originalImage {
-                    Image(uiImage: originalImage)
-                        .resizable()
-                        .scaledToFill()
-                        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                } else {
-                    VStack(spacing: 12) {
-                        Image(systemName: "camera.viewfinder")
-                            .font(.system(size: 36, weight: .light))
-                        Text("添加饮品照片")
-                            .font(.headline)
-                        Text("会自动生成透明背景小贴图")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    RatingControl(value: $rating)
+                    photoActions
                 }
-
-                if isProcessing {
-                    RoundedRectangle(cornerRadius: 28, style: .continuous)
-                        .fill(.black.opacity(0.28))
-                    ProgressView("生成贴图中")
-                        .tint(.white)
-                        .foregroundStyle(.white)
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(height: 300)
-            .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-
-            HStack(spacing: 12) {
-                if !isEditing {
-                    PhotosPicker(selection: $photoItem, matching: .images) {
-                        Label("相册", systemImage: "photo")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                Button {
-                    openCamera()
-                } label: {
-                    Label(isEditing ? "重新拍照" : "拍照", systemImage: "camera")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            .disabled(isProcessing)
-
         }
+    }
+
+    private var photoPreview: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(.white)
+
+            if let stickerImage {
+                Button {
+                    showingStickerPreview = true
+                } label: {
+                    ZStack(alignment: .bottomTrailing) {
+                        Image(uiImage: stickerImage)
+                            .resizable()
+                            .scaledToFit()
+                            .padding(10)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        Image(systemName: "plus.magnifyingglass")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .padding(7)
+                            .background(.white.opacity(0.92))
+                            .clipShape(Circle())
+                            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+                            .padding(8)
+                    }
+                }
+                .buttonStyle(.plain)
+            } else if let originalImage {
+                Image(uiImage: originalImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            } else {
+                VStack(spacing: 7) {
+                    Image(systemName: "camera.viewfinder")
+                        .font(.system(size: 28, weight: .light))
+                    Text("添加照片")
+                        .font(.subheadline.weight(.semibold))
+                    Text("生成贴图")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .foregroundStyle(.secondary)
+            }
+
+            if isProcessing {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.black.opacity(0.28))
+                ProgressView()
+                    .tint(.white)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipped()
+    }
+
+    private var photoActions: some View {
+        HStack(spacing: 8) {
+            PhotosPicker(selection: $photoItem, matching: .images) {
+                Label(isEditing ? "重新上传" : "相册", systemImage: "photo")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                openCamera()
+            } label: {
+                Label(isEditing ? "重新拍照" : "拍照", systemImage: "camera")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .font(.caption.weight(.semibold))
+        .disabled(isProcessing)
     }
 
     private var infoCard: some View {
         Card(title: "饮品信息") {
-            BrandSelectionField(brand: brand) {
-                showingBrandPicker = true
+            HStack(alignment: .top, spacing: 10) {
+                BrandSelectionField(brand: brand) {
+                    showingBrandPicker = true
+                }
+                MinimalTextField(title: "品名", placeholder: "例如 芝芝莓莓", text: $name)
             }
-            MinimalTextField(title: "品名", placeholder: "例如 芝芝莓莓", text: $name)
 
             OptionChips(title: "甜度", options: sweetnessOptions, selection: $sweetness)
             OptionChips(title: "冰度", options: iceOptions, selection: $iceLevel)
-            LimitedToggle(isOn: $isLimited)
-            cupCountStepper
 
-            DatePicker("饮用时间", selection: $consumedAt, displayedComponents: [.date, .hourAndMinute])
+            HStack(alignment: .center, spacing: 10) {
+                LimitedToggle(isOn: $isLimited)
+                cupCountStepper
+            }
+
+            DatePicker("饮用时间", selection: $consumedAt, displayedComponents: [.date])
                 .font(.subheadline)
 
-            MinimalTextField(title: "地点", placeholder: "可选", text: $location)
-            MultilineTextField(title: "备注", placeholder: "加料、做法、非常见选项", text: $note)
-        }
-    }
-
-    private var ratingCard: some View {
-        Card(title: "评分") {
-            RatingControl(value: $rating)
+            MultilineTextField(title: "备注", placeholder: "加料、做法", text: $note)
         }
     }
 
     private var cupCountStepper: some View {
-        Stepper(value: $cupCount, in: 1...999) {
-            HStack {
-                Text("喝过杯数")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-                Text("\(cupCount) 杯")
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+        HStack(spacing: 8) {
+            Text("杯数")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 4)
+            Text("\(cupCount)")
+                .font(.subheadline.weight(.bold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Stepper("", value: $cupCount, in: 1...999)
+                .labelsHidden()
+                .fixedSize()
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color(.secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var saveButton: some View {
@@ -303,12 +322,11 @@ struct DrinkFormView: View {
                 .contentTransition(.numericText())
                 .font(.headline)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
+                .padding(.vertical, 11)
         }
         .buttonStyle(.borderedProminent)
         .clipShape(Capsule())
         .disabled(!canSave)
-        .padding(.top, 4)
     }
 
     private var canSave: Bool {
@@ -371,7 +389,7 @@ struct DrinkFormView: View {
                     iceLevel: iceLevel,
                     rating: rating,
                     consumedAt: consumedAt,
-                    location: location.trimmingCharacters(in: .whitespacesAndNewlines),
+                    location: "",
                     note: note.trimmingCharacters(in: .whitespacesAndNewlines),
                     isLimited: isLimited,
                     cupCount: cupCount,
@@ -387,7 +405,7 @@ struct DrinkFormView: View {
                 drink.iceLevel = iceLevel
                 drink.rating = rating
                 drink.consumedAt = consumedAt
-                drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
+                drink.location = ""
                 drink.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
                 drink.isLimited = isLimited
                 drink.cupCount = max(1, cupCount)
@@ -435,7 +453,7 @@ struct DrinkFormView: View {
             drink.iceLevel = iceLevel
             drink.rating = rating
             drink.consumedAt = consumedAt
-            drink.location = location.trimmingCharacters(in: .whitespacesAndNewlines)
+            drink.location = ""
             drink.note = note.trimmingCharacters(in: .whitespacesAndNewlines)
             drink.isLimited = isLimited
             drink.cupCount = max(1, drink.cupCount + 1)
@@ -608,10 +626,10 @@ private struct Card<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                 if let subtitle {
                     Text(subtitle)
                         .font(.footnote)
@@ -621,10 +639,10 @@ private struct Card<Content: View>: View {
 
             content
         }
-        .padding(16)
+        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.white)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 }
 
@@ -634,17 +652,19 @@ private struct MinimalTextField: View {
     @Binding var text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             TextField(placeholder, text: $text)
                 .textFieldStyle(.plain)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 12)
+                .font(.subheadline)
+                .padding(.vertical, 8)
+                .padding(.horizontal, 10)
                 .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -654,27 +674,28 @@ private struct MultilineTextField: View {
     @Binding var text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             TextEditor(text: $text)
-                .frame(minHeight: 74)
-                .padding(8)
+                .font(.subheadline)
+                .frame(minHeight: 44, maxHeight: 54)
+                .padding(6)
                 .scrollContentBackground(.hidden)
                 .background(alignment: .topLeading) {
                     if text.isEmpty {
                         Text(placeholder)
-                            .font(.body)
+                            .font(.subheadline)
                             .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 16)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 12)
                             .allowsHitTesting(false)
                     }
                 }
                 .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 }
@@ -684,7 +705,7 @@ private struct LimitedToggle: View {
 
     var body: some View {
         Toggle(isOn: $isOn) {
-            HStack(spacing: 10) {
+            HStack(spacing: 7) {
                 Text("限定")
                     .font(.subheadline.weight(.semibold))
                 Text(isOn ? "是" : "否")
@@ -697,7 +718,7 @@ private struct LimitedToggle: View {
             }
         }
         .toggleStyle(.switch)
-        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -706,7 +727,7 @@ private struct BrandSelectionField: View {
     let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             Text("品牌")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -720,13 +741,15 @@ private struct BrandSelectionField: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.tertiary)
                 }
-                .padding(.vertical, 12)
-                .padding(.horizontal, 12)
+                .font(.subheadline)
+                .padding(.vertical, 9)
+                .padding(.horizontal, 10)
                 .background(Color(.secondarySystemGroupedBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -736,12 +759,12 @@ private struct OptionChips: View {
     @Binding var selection: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     ForEach(options, id: \.self) { option in
                         Button(option) {
                             selection = option
@@ -850,12 +873,12 @@ private struct RatingControl: View {
     @State private var isHorizontalRatingDrag = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 Text(String(format: "%.2f", value))
-                    .font(.system(size: 42, weight: .semibold, design: .rounded).monospacedDigit())
+                    .font(.system(size: 28, weight: .semibold, design: .rounded).monospacedDigit())
                 Text("/ 5")
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
 
@@ -865,7 +888,7 @@ private struct RatingControl: View {
 
                     Capsule()
                         .fill(Color.primary)
-                        .frame(width: 4, height: 42)
+                        .frame(width: 4, height: 32)
                         .offset(x: markerOffset(width: proxy.size.width) - 2)
                 }
                 .contentShape(Rectangle())
@@ -885,7 +908,7 @@ private struct RatingControl: View {
                         }
                 )
             }
-            .frame(height: 54)
+            .frame(height: 42)
         }
     }
 
@@ -940,7 +963,7 @@ private struct RatingRulerMarks: View {
                         .foregroundStyle(.secondary)
                         .offset(
                             x: labelOffset(for: number, width: proxy.size.width),
-                            y: 34
+                            y: 26
                         )
                 }
             }
@@ -948,9 +971,9 @@ private struct RatingRulerMarks: View {
     }
 
     private func markHeight(for value: Double) -> CGFloat {
-        if abs(value.rounded() - value) < 0.001 { return 28 }
-        if abs(value.truncatingRemainder(dividingBy: 1) - 0.95) < 0.001 { return 22 }
-        return 12
+        if abs(value.rounded() - value) < 0.001 { return 22 }
+        if abs(value.truncatingRemainder(dividingBy: 1) - 0.95) < 0.001 { return 17 }
+        return 9
     }
 
     private func labelOffset(for number: Int, width: CGFloat) -> CGFloat {
@@ -965,9 +988,9 @@ private struct ChipButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.footnote.weight(.medium))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             .foregroundStyle(isSelected ? .white : .primary)
             .background(isSelected ? Color.primary : Color(.secondarySystemGroupedBackground))
             .clipShape(Capsule())

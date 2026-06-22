@@ -5,6 +5,7 @@ struct NearbyTransferView: View {
     let sharedStore: SharedCompendiumStore
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
     let onImported: (SharedCompendium) -> Void
+    let onCompare: (SharedCompendium) -> Void
 
     @AppStorage("NearbyTransferDisplayName") private var savedDisplayName = NearbyDisplayNameStore.displayName
 
@@ -19,9 +20,11 @@ struct NearbyTransferView: View {
                 NearbyDisplayNameStore.displayName = cleaned
                 savedDisplayName = cleaned
             },
-            onImported: onImported
+            onImported: onImported,
+            onCompare: onCompare
         )
         .id(savedDisplayName)
+        .dismissKeyboardOnTap()
     }
 }
 
@@ -40,6 +43,7 @@ private struct NearbyTransferSessionView: View {
     let displayName: String
     let onSaveDisplayName: (String) -> Void
     let onImported: (SharedCompendium) -> Void
+    let onCompare: (SharedCompendium) -> Void
 
     @StateObject private var manager: NearbyTransferManager
     @State private var message: String?
@@ -55,7 +59,8 @@ private struct NearbyTransferSessionView: View {
         tasteStatsStore: TasteExchangeStatsStore,
         displayName: String,
         onSaveDisplayName: @escaping (String) -> Void,
-        onImported: @escaping (SharedCompendium) -> Void
+        onImported: @escaping (SharedCompendium) -> Void,
+        onCompare: @escaping (SharedCompendium) -> Void
     ) {
         self.drinks = drinks
         self.sharedStore = sharedStore
@@ -63,6 +68,7 @@ private struct NearbyTransferSessionView: View {
         self.displayName = displayName
         self.onSaveDisplayName = onSaveDisplayName
         self.onImported = onImported
+        self.onCompare = onCompare
         _manager = StateObject(wrappedValue: NearbyTransferManager(summary: Self.summary(for: drinks, displayName: displayName)))
     }
 
@@ -130,7 +136,11 @@ private struct NearbyTransferSessionView: View {
             .sheet(item: $selectedPeer) { peer in
                 PeerExchangePanel(
                     peer: peer,
-                    isImported: isImported(peer),
+                    importedCompendium: importedCompendium(for: peer),
+                    onCompare: { compendium in
+                        selectedPeer = nil
+                        onCompare(compendium)
+                    },
                     onExchange: {
                         manager.exchange(with: peer)
                         selectedPeer = nil
@@ -140,7 +150,7 @@ private struct NearbyTransferSessionView: View {
                         selectedPeer = nil
                     }
                 )
-                .presentationDetents([.height(250)])
+                .presentationDetents([.height(importedCompendium(for: peer) == nil ? 250 : 310)])
             }
             .sheet(isPresented: $showingDisplayNameEditor) {
                 DisplayNameEditor(
@@ -163,15 +173,27 @@ private struct NearbyTransferSessionView: View {
     private var myCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 14) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("会喝档案", systemImage: "person.crop.circle.badge.checkmark")
-                        .font(.caption.weight(.black))
-                        .foregroundStyle(.secondary)
+                HStack(alignment: .center, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(Color.black.opacity(0.9))
+                        Image(systemName: "person.crop.circle.fill")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .frame(width: 54, height: 54)
+                    .shadow(color: .black.opacity(0.12), radius: 10, y: 5)
 
-                    Text(displayName)
-                        .font(.system(size: 28, weight: .black, design: .rounded))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.72)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(displayName)
+                            .font(.system(size: 28, weight: .black, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                        Text("\(profileCupCount) 杯 · \(drinks.count) 项")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Spacer(minLength: 8)
@@ -185,7 +207,7 @@ private struct NearbyTransferSessionView: View {
                 summaryPill(value: String(format: "%.2f", averageRating), label: "均分")
                 summaryPill(value: "\(tasteStatsStore.stats.successfulExchangeCount)", label: "交换")
             }
-            friendCupPill
+            friendTotalsPanel
 
             VStack(alignment: .leading, spacing: 9) {
                 Text("前三品牌")
@@ -222,11 +244,8 @@ private struct NearbyTransferSessionView: View {
 
     private var scoreBadge: some View {
         VStack(spacing: 3) {
-            Text("会喝指数")
-                .font(.caption2.weight(.black))
-                .foregroundStyle(.secondary)
             Text(String(format: "%.2f", tasteScore.score))
-                .font(.system(size: 40, weight: .black, design: .rounded).monospacedDigit())
+                .font(.system(size: 38, weight: .black, design: .rounded).monospacedDigit())
                 .foregroundStyle(.primary)
             Text(tasteScore.levelName)
                 .font(.caption.weight(.bold))
@@ -234,7 +253,7 @@ private struct NearbyTransferSessionView: View {
                 .lineLimit(1)
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 11)
+        .padding(.vertical, 12)
         .frame(minWidth: 104)
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -263,34 +282,29 @@ private struct NearbyTransferSessionView: View {
         )
     }
 
-    private var friendCupPill: some View {
+    private var friendTotalsPanel: some View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.blue.opacity(0.12))
+                    .fill(Color.blue.opacity(0.13))
                 Image(systemName: "person.2.fill")
                     .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(.blue)
             }
             .frame(width: 42, height: 42)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(totalCupCountWithFriends)")
-                    .font(.title3.weight(.black).monospacedDigit())
-                Text("和朋友的总杯数")
-                    .font(.caption.weight(.semibold))
+            VStack(alignment: .leading, spacing: 8) {
+                Text("和朋友一起")
+                    .font(.caption.weight(.black))
                     .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    friendTotalMetric(value: totalCupCountWithFriends, label: "总杯数")
+                    friendTotalMetric(value: totalCollectionCountWithFriends, label: "总收集数")
+                }
             }
 
-            Spacer()
-
-            Text("朋友 \(friendsCupCount)")
-                .font(.caption.weight(.bold).monospacedDigit())
-                .foregroundStyle(.blue)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 6)
-                .background(Color.blue.opacity(0.1))
-                .clipShape(Capsule())
+            Spacer(minLength: 0)
         }
         .padding(12)
         .background(Color.blue.opacity(0.055))
@@ -298,6 +312,25 @@ private struct NearbyTransferSessionView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(Color.blue.opacity(0.16), lineWidth: 1)
+        )
+    }
+
+    private func friendTotalMetric(value: Int, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(value)")
+                .font(.headline.weight(.black).monospacedDigit())
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.white.opacity(0.74))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.blue.opacity(0.12), lineWidth: 1)
         )
     }
 
@@ -416,7 +449,7 @@ private struct NearbyTransferSessionView: View {
     }
 
     private var profileCupCount: Int {
-        TasteScoreCalculator.effectiveCupCount(drinks: drinks)
+        TasteScoreCalculator.totalActualCupCount(drinks: drinks)
     }
 
     private var friendsCupCount: Int {
@@ -425,6 +458,13 @@ private struct NearbyTransferSessionView: View {
 
     private var totalCupCountWithFriends: Int {
         profileCupCount + friendsCupCount
+    }
+
+    private var totalCollectionCountWithFriends: Int {
+        TasteScoreCalculator.fuzzyUniqueProductCount(
+            localDrinks: drinks,
+            peers: tasteStatsStore.stats.peers
+        )
     }
 
     private var tasteScore: TasteScoreResult {
@@ -459,7 +499,7 @@ private struct NearbyTransferSessionView: View {
 
     private var filteredPeers: [NearbyPeer] {
         manager.peers.filter { peer in
-            let imported = isImported(peer)
+            let imported = importedCompendium(for: peer) != nil
             let matchesFilter = switch filter {
             case .all:
                 true
@@ -475,7 +515,11 @@ private struct NearbyTransferSessionView: View {
     }
 
     private func isImported(_ peer: NearbyPeer) -> Bool {
-        sharedStore.compendiums.contains { $0.ownerID == peer.stableID }
+        importedCompendium(for: peer) != nil
+    }
+
+    private func importedCompendium(for peer: NearbyPeer) -> SharedCompendium? {
+        sharedStore.compendiums.first { $0.ownerID == peer.stableID }
     }
 
     private func makePackageData() async throws -> Data {
@@ -489,17 +533,21 @@ private struct NearbyTransferSessionView: View {
     private func importPackage(at url: URL) {
         Task {
             do {
+                let existingOwnerIDs = Set(sharedStore.compendiums.map(\.ownerID))
                 let compendium = try await sharedStore.importArchive(at: url)
                 let profile = TasteScoreCalculator.profile(from: compendium)
                 tasteStatsStore.recordSuccessfulExchange(
                     ownerID: compendium.ownerID,
                     ownerName: compendium.ownerName,
-                    drinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
+                    drinkCount: TasteScoreCalculator.totalActualCupCount(profile: profile),
+                    effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
                     averageRating: TasteScoreCalculator.averageRating(profile: profile),
                     profile: profile
                 )
                 onImported(compendium)
-                message = "已导入 \(compendium.ownerName) 的档案"
+                message = existingOwnerIDs.contains(compendium.ownerID)
+                    ? "已更新 \(compendium.ownerName) 的档案"
+                    : "已导入 \(compendium.ownerName) 的档案"
             } catch {
                 message = error.localizedDescription
             }
@@ -631,7 +679,7 @@ private struct PeerCard: View {
                     Text(peer.name)
                         .font(.headline.weight(.black))
                         .lineLimit(1)
-                    Text(isImported ? "已在共享图鉴" : "可交换档案")
+                    Text(isImported ? "已在共享图鉴，可更新" : "可交换档案")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(isImported ? .green : .secondary)
                 }
@@ -673,9 +721,14 @@ private struct PeerCard: View {
 
 private struct PeerExchangePanel: View {
     let peer: NearbyPeer
-    let isImported: Bool
+    let importedCompendium: SharedCompendium?
+    let onCompare: (SharedCompendium) -> Void
     let onExchange: () -> Void
     let onDisconnect: () -> Void
+
+    private var isImported: Bool {
+        importedCompendium != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -692,12 +745,32 @@ private struct PeerExchangePanel: View {
                     .foregroundStyle(.secondary)
             }
 
-            Button(action: onExchange) {
-                Label("交换档案", systemImage: "arrow.triangle.2.circlepath.circle.fill")
-                    .frame(maxWidth: .infinity)
+            if let importedCompendium {
+                Button {
+                    onCompare(importedCompendium)
+                } label: {
+                    Label("查看共饮", systemImage: "rectangle.split.2x1")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+
+            if isImported {
+                Button(action: onExchange) {
+                    Label("交换并更新档案", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            } else {
+                Button(action: onExchange) {
+                    Label("交换档案", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+            }
 
             Button("断开连接", role: .destructive, action: onDisconnect)
                 .frame(maxWidth: .infinity)
