@@ -245,17 +245,17 @@ struct CompendiumComparisonView: View {
                 node.representative.stickerImageName ?? node.representative.stickerFileURL?.lastPathComponent ?? ""
             ].joined(separator: "#")
         }.joined(separator: "|")
-        return "\(sharedCompendium.ownerID):matched-only:\(viewportKey):\(nodeKey)"
+        return "\(sharedCompendium.ownerID):matched-only:overview-layout-v1:\(viewportKey):\(nodeKey)"
     }
 
     private func canvasSize(for viewport: CGSize) -> CGSize {
         let count = CGFloat(max(visibleLocalNodes.count, visiblePeerNodes.count, 1))
+        let overviewWidth = viewport.width / Self.initialZoomScale * 0.98
+        let overviewHeight = viewport.height / Self.initialZoomScale * 0.98
+        let densityHeight = 940 + count * 11 + Self.ladderCanvasVerticalSafePadding * 2
         return CGSize(
-            width: max(viewport.width * 2.36, 1040),
-            height: max(
-                viewport.height * 2.28 + Self.ladderCanvasVerticalSafePadding * 2,
-                940 + count * 11 + Self.ladderCanvasVerticalSafePadding * 2
-            )
+            width: max(overviewWidth, 1040),
+            height: max(overviewHeight, densityHeight)
         )
     }
 
@@ -477,6 +477,7 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
                 y: (metrics.plotTop + metrics.plotBottom) / 2
             )
         )
+        context.coordinator.viewport.requestReset(zoomScale: CompendiumComparisonView.initialZoomScale)
         return scrollView
     }
 
@@ -507,18 +508,19 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         }
         if contentDidChange || sizeDidChange {
             context.coordinator.canvasView?.configure(metrics: metrics, nodes: nodes, connections: connections, contentSize: contentSize, contentSignature: contentSignature)
+            if !centerResetDidChange {
+                context.coordinator.viewport.clampContentOffset()
+            }
         }
 
-        if !centerResetDidChange,
-           !context.coordinator.isZooming,
-           abs(scrollView.zoomScale - zoomScale) > 0.001 {
+        if centerResetDidChange || sizeDidChange || contentDidChange {
+            context.coordinator.viewport.requestReset(zoomScale: CompendiumComparisonView.initialZoomScale)
+        } else if !context.coordinator.isZooming,
+                  abs(scrollView.zoomScale - zoomScale) > 0.001 {
             scrollView.setZoomScale(zoomScale, animated: false)
         }
         context.coordinator.canvasView?.applyZoom(scale: scrollView.zoomScale, mode: context.coordinator.isZooming ? .preview : .settled)
         context.coordinator.canvasView?.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
-        if centerResetDidChange || contentDidChange || sizeDidChange {
-            context.coordinator.viewport.requestReset(zoomScale: CompendiumComparisonView.initialZoomScale)
-        }
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
@@ -575,9 +577,11 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             isZooming = false
-            zoomScale.wrappedValue = scale
+            let settledScale = scrollView.zoomScale
+            zoomScale.wrappedValue = settledScale
             viewport.updateContentInsets()
-            canvasView?.applyZoom(scale: scale, mode: .settled, animatesLabel: true)
+            viewport.clampContentOffset()
+            canvasView?.applyZoom(scale: settledScale, mode: .settled, animatesLabel: true)
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
@@ -686,11 +690,11 @@ private final class ComparisonLadderCanvasUIView: UIView {
     }
 
     static func nodeCounterScale(for scale: CGFloat) -> CGFloat {
-        1 / pow(max(min(2.35, max(0.48, scale)), 0.01), 0.46)
+        1 / pow(max(min(2.35, max(CompendiumComparisonView.minimumZoomScale, scale)), 0.01), 0.46)
     }
 
     private static func labelRevealProgress(for scale: CGFloat) -> CGFloat {
-        let raw = (min(2.35, max(0.48, scale)) - 0.82) / (1.06 - 0.82)
+        let raw = (min(2.35, max(CompendiumComparisonView.minimumZoomScale, scale)) - 0.82) / (1.06 - 0.82)
         let clamped = min(1, max(0, raw))
         return clamped * clamped * (3 - 2 * clamped)
     }
