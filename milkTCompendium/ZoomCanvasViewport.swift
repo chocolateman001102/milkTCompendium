@@ -13,6 +13,7 @@ final class ZoomCanvasViewportController {
     weak var scrollView: UIScrollView?
     private var canvasSize: CGSize = .zero
     private var focusPoint: CGPoint = .zero
+    private var centeringOffset: CGPoint = .zero
     private var centeringGeneration = 0
     private var pendingResetZoomScale: CGFloat?
 
@@ -20,9 +21,10 @@ final class ZoomCanvasViewportController {
         self.scrollView = scrollView
     }
 
-    func update(canvasSize: CGSize, focusPoint: CGPoint) {
+    func update(canvasSize: CGSize, focusPoint: CGPoint, centeringOffset: CGPoint = .zero) {
         self.canvasSize = canvasSize
         self.focusPoint = focusPoint
+        self.centeringOffset = centeringOffset
     }
 
     func handleLayout() {
@@ -55,10 +57,10 @@ final class ZoomCanvasViewportController {
         let horizontalInset = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
         let verticalInset = max(0, (scrollView.bounds.height - scrollView.contentSize.height) / 2)
         let inset = UIEdgeInsets(
-            top: verticalInset,
-            left: horizontalInset,
-            bottom: verticalInset,
-            right: horizontalInset
+            top: max(0, verticalInset - centeringOffset.y),
+            left: max(0, horizontalInset - centeringOffset.x),
+            bottom: verticalInset + max(0, centeringOffset.y),
+            right: horizontalInset + max(0, centeringOffset.x)
         )
         guard scrollView.contentInset != inset else { return }
         scrollView.contentInset = inset
@@ -89,8 +91,8 @@ final class ZoomCanvasViewportController {
             height: min(canvasSize.height, scrollView.bounds.height / targetScale)
         )
         let visibleOrigin = CGPoint(
-            x: min(max(focusPoint.x - visibleSize.width / 2, 0), max(0, canvasSize.width - visibleSize.width)),
-            y: min(max(focusPoint.y - visibleSize.height / 2, 0), max(0, canvasSize.height - visibleSize.height))
+            x: min(max(focusPoint.x - visibleSize.width / 2 + centeringOffset.x, 0), max(0, canvasSize.width - visibleSize.width)),
+            y: min(max(focusPoint.y - visibleSize.height / 2 + centeringOffset.y, 0), max(0, canvasSize.height - visibleSize.height))
         )
         let visibleRect = CGRect(origin: visibleOrigin, size: visibleSize)
         scrollView.zoom(to: visibleRect, animated: false)

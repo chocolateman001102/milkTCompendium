@@ -44,20 +44,26 @@ struct CollectionView: View {
     @State private var ladderCenterResetToken = 0
     @State private var searchText = ""
     @State private var selectedBrandFilter: String?
-    @State private var selectedRatingLowerBound = 0.0
-    @State private var selectedRatingUpperBound = 5.0
     @State private var isFilterPanelExpanded = false
+    @State private var showingExportShare = false
+    @State private var exportedFileURL: URL?
+    @State private var showingImportPicker = false
+    @State private var isExporting = false
+    @State private var isImporting = false
+    @State private var importResult: String?
+    @State private var exportError: String?
     @StateObject private var derivedDataCache = CollectionDerivedDataCache()
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
 
-    fileprivate static let defaultLadderScale: CGFloat = 0.44
+    fileprivate static let defaultLadderScale: CGFloat = 0.40
     fileprivate static let initialLadderScale: CGFloat = defaultLadderScale
     fileprivate static let labelFadeStartScale: CGFloat = 0.9
     fileprivate static let labelRevealScale: CGFloat = 1.1
-    private let ladderTopControlClearance: CGFloat = 142
-    private let ladderCanvasVerticalSafePadding: CGFloat = 96
+    private let ladderTopControlClearance: CGFloat = 190
+    private let ladderCanvasVerticalSafePadding: CGFloat = 64
+    fileprivate static let initialLadderVisualYOffset: CGFloat = 160
     private static let preferredSameColumnRatingGap: Double = 0.20
     private static let iconCollisionTolerance: CGFloat = 4
 
@@ -150,8 +156,7 @@ struct CollectionView: View {
         let filterKey = [
             selectedCompendiumID,
             normalizedSearchText,
-            selectedBrandFilter ?? "*",
-            String(format: "%.1f-%.1f", selectedRatingLowerBound, selectedRatingUpperBound)
+            selectedBrandFilter ?? "*"
         ].joined(separator: "#")
         let itemKey = items.map { item in
             [
@@ -188,8 +193,6 @@ struct CollectionView: View {
     private var hasActiveFilter: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || selectedBrandFilter != nil
-            || selectedRatingLowerBound > 0
-            || selectedRatingUpperBound < 5
     }
 
     var body: some View {
@@ -218,8 +221,6 @@ struct CollectionView: View {
             LadderTopDock(
                 searchText: $searchText,
                 selectedBrand: $selectedBrandFilter,
-                selectedRatingLowerBound: $selectedRatingLowerBound,
-                selectedRatingUpperBound: $selectedRatingUpperBound,
                 isFilterPanelExpanded: $isFilterPanelExpanded,
                 isShowingMine: isShowingMine,
                 selectedCompendiumID: selectedCompendiumID,
@@ -232,9 +233,20 @@ struct CollectionView: View {
                 totalCount: displayItems.count,
                 hasItems: !displayItems.isEmpty,
                 hasActiveFilter: hasActiveFilter,
+                canExport: !drinks.isEmpty,
+                isExporting: isExporting,
+                isImporting: isImporting,
                 onSwitchCompendium: switchCompendium,
                 onCompareCompendium: openComparison,
                 onOpenProfile: { showingTransfer = true },
+                onExport: {
+                    Task {
+                        await exportData()
+                    }
+                },
+                onImport: {
+                    showingImportPicker = true
+                },
                 onClear: clearFilters
             )
             .padding(.top, 12)
@@ -315,6 +327,37 @@ struct CollectionView: View {
                 }
             )
         }
+        .sheet(isPresented: $showingExportShare) {
+            if let exportedURL = exportedFileURL {
+                ShareSheet(items: [exportedURL]) {
+                    showingExportShare = false
+                    // 清理临时文件（可选）
+                    try? FileManager.default.removeItem(at: exportedURL)
+                    exportedFileURL = nil
+                }
+            }
+        }
+        .fileImporter(
+            isPresented: $showingImportPicker,
+            allowedContentTypes: [.zip],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                Task {
+                    await importData(from: url)
+                }
+            case .failure:
+                break
+            }
+        }
+        .dataAlerts(
+            exportedFileURL: $exportedFileURL,
+            exportError: $exportError,
+            importResult: $importResult,
+            showingExportShare: $showingExportShare
+        )
         .dismissKeyboardOnTap()
     }
 
@@ -326,7 +369,8 @@ struct CollectionView: View {
                 let metrics = LadderMetrics(
                     size: canvasSize,
                     topClearance: ladderPlotTopClearance,
-                    bottomClearance: ladderPlotBottomClearance
+                    bottomClearance: ladderPlotBottomClearance,
+                    verticalVisualOffset: Self.initialLadderVisualYOffset
                 )
                 let entries = ladderEntries(in: metrics)
                 return LadderLayoutSnapshot(
@@ -512,10 +556,6 @@ struct CollectionView: View {
             return false
         }
 
-        guard item.rating >= selectedRatingLowerBound && item.rating <= selectedRatingUpperBound else {
-            return false
-        }
-
         guard !query.isEmpty else {
             return true
         }
@@ -640,8 +680,6 @@ struct CollectionView: View {
         withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
             searchText = ""
             selectedBrandFilter = nil
-            selectedRatingLowerBound = 0
-            selectedRatingUpperBound = 5
             isFilterPanelExpanded = false
         }
     }
@@ -713,11 +751,46 @@ struct CollectionView: View {
         .joined(separator: "|")
         let filterKey = [
             normalizedSearchText,
-            selectedBrandFilter ?? "*",
-            String(format: "%.1f-%.1f", selectedRatingLowerBound, selectedRatingUpperBound)
+            selectedBrandFilter ?? "*"
         ].joined(separator: "#")
-        return "\(selectedCompendiumID):\(viewportKey):\(filterKey):\(itemKey)"
+        return "\(selectedCompendiumID):ladder-layout-v2:\(viewportKey):\(filterKey):\(itemKey)"
     }
+
+    // MARK: - Data Export/Import
+
+    private func exportData() async {
+        guard !drinks.isEmpty else { return }
+        isExporting = true
+        defer { isExporting = false }
+
+        do {
+            let fileURL = try await DataMigrationManager.exportAllData(drinks: drinks)
+            await MainActor.run {
+                exportedFileURL = fileURL
+            }
+        } catch {
+            await MainActor.run {
+                exportError = "导出失败: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func importData(from url: URL) async {
+        isImporting = true
+        defer { isImporting = false }
+
+        do {
+            let count = try await DataMigrationManager.importBackup(from: url, modelContext: modelContext)
+            await MainActor.run {
+                importResult = "成功导入 \(count) 条饮品记录"
+            }
+        } catch {
+            await MainActor.run {
+                importResult = "导入失败: \(error.localizedDescription)"
+            }
+        }
+    }
+
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
         let drinkCount = CGFloat(max(filteredDisplayItems.count, 1))
@@ -1126,8 +1199,6 @@ struct CollectionView: View {
 private struct LadderTopDock: View {
     @Binding var searchText: String
     @Binding var selectedBrand: String?
-    @Binding var selectedRatingLowerBound: Double
-    @Binding var selectedRatingUpperBound: Double
     @Binding var isFilterPanelExpanded: Bool
 
     let isShowingMine: Bool
@@ -1141,9 +1212,14 @@ private struct LadderTopDock: View {
     let totalCount: Int
     let hasItems: Bool
     let hasActiveFilter: Bool
+    let canExport: Bool
+    let isExporting: Bool
+    let isImporting: Bool
     let onSwitchCompendium: (String) -> Void
     let onCompareCompendium: (SharedCompendium) -> Void
     let onOpenProfile: () -> Void
+    let onExport: () -> Void
+    let onImport: () -> Void
     let onClear: () -> Void
 
     var body: some View {
@@ -1157,8 +1233,30 @@ private struct LadderTopDock: View {
                         compareMenu
                     }
 
-                    Button(action: onOpenProfile) {
-                        dockIcon(systemName: "dot.radiowaves.left.and.right", isActive: true)
+                    Menu {
+                        Button {
+                            onOpenProfile()
+                        } label: {
+                            Label("线下互传", systemImage: "dot.radiowaves.left.and.right")
+                        }
+
+                        Divider()
+
+                        Button {
+                            onExport()
+                        } label: {
+                            Label("导出备份", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(isExporting || !canExport)
+
+                        Button {
+                            onImport()
+                        } label: {
+                            Label("导入备份", systemImage: "square.and.arrow.down")
+                        }
+                        .disabled(isImporting)
+                    } label: {
+                        dockIcon(systemName: "ellipsis", isActive: true)
                     }
                     .buttonStyle(LeverControlButtonStyle())
                 }
@@ -1343,11 +1441,6 @@ private struct LadderTopDock: View {
             }
             .buttonStyle(.plain)
 
-            RatingRangeRuler(
-                lowerBound: $selectedRatingLowerBound,
-                upperBound: $selectedRatingUpperBound
-            )
-
             Spacer(minLength: 0)
         }
         .padding(7)
@@ -1394,109 +1487,6 @@ private struct LadderTopDock: View {
         .padding(.vertical, 7)
         .background(isActive ? Color.black.opacity(0.88) : Color.black.opacity(0.06))
         .clipShape(Capsule())
-    }
-}
-
-private struct RatingRangeRuler: View {
-    @Binding var lowerBound: Double
-    @Binding var upperBound: Double
-
-    private let markCount = 5
-    private let handleSize: CGFloat = 24
-    private let trackHeight: CGFloat = 4
-
-    var body: some View {
-        GeometryReader { proxy in
-                let width = max(1, proxy.size.width)
-                let usableWidth = max(1, width - handleSize)
-                let lowerX = xPosition(for: lowerBound, usableWidth: usableWidth)
-                let upperX = xPosition(for: upperBound, usableWidth: usableWidth)
-                let centerY = proxy.size.height / 2
-
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.black.opacity(0.08))
-                        .frame(height: trackHeight)
-                        .position(x: width / 2, y: centerY)
-
-                    Capsule()
-                        .fill(Color.black.opacity(0.78))
-                        .frame(width: max(trackHeight, upperX - lowerX), height: trackHeight)
-                        .position(x: (lowerX + upperX) / 2, y: centerY)
-
-                    ForEach(0...markCount, id: \.self) { mark in
-                        let markX = xPosition(for: Double(mark), usableWidth: usableWidth)
-                        VStack(spacing: 2) {
-                            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                                .fill(Color.black.opacity(0.36))
-                                .frame(width: 2, height: mark == 0 || mark == markCount ? 10 : 7)
-                            Text("\(mark)")
-                                .font(.system(size: 8, weight: .bold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
-                        .position(x: markX, y: centerY + 13)
-                    }
-
-                    rangeHandle(isLower: true)
-                        .position(x: lowerX, y: centerY)
-                        .gesture(dragGesture(isLower: true, usableWidth: usableWidth))
-
-                    rangeHandle(isLower: false)
-                        .position(x: upperX, y: centerY)
-                        .gesture(dragGesture(isLower: false, usableWidth: usableWidth))
-                }
-            }
-            .frame(height: 36)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .frame(width: 146)
-        .background(Color.black.opacity(isActive ? 0.08 : 0.045))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-
-    private var title: String {
-        if !isActive { return "全部分数" }
-        return String(format: "%.0f-%.0f 分", lowerBound, upperBound)
-    }
-
-    private var isActive: Bool {
-        lowerBound > 0 || upperBound < 5
-    }
-
-    private func xPosition(for value: Double, usableWidth: CGFloat) -> CGFloat {
-        handleSize / 2 + CGFloat(min(5, max(0, value)) / 5) * usableWidth
-    }
-
-    private func value(for locationX: CGFloat, usableWidth: CGFloat) -> Double {
-        let progress = min(1, max(0, (locationX - handleSize / 2) / usableWidth))
-        return (Double(progress) * 5).rounded()
-    }
-
-    private func rangeHandle(isLower: Bool) -> some View {
-        ZStack {
-            Circle()
-                .fill(.white)
-            Circle()
-                .stroke(Color.black.opacity(0.82), lineWidth: 2)
-            Image(systemName: isLower ? "chevron.left" : "chevron.right")
-                .font(.system(size: 8, weight: .black))
-                .foregroundStyle(.black.opacity(0.72))
-        }
-        .frame(width: handleSize, height: handleSize)
-        .shadow(color: .black.opacity(0.16), radius: 6, y: 3)
-        .accessibilityLabel(isLower ? "最低分" : "最高分")
-    }
-
-    private func dragGesture(isLower: Bool, usableWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                let next = self.value(for: value.location.x, usableWidth: usableWidth)
-                if isLower {
-                    lowerBound = min(next, upperBound)
-                } else {
-                    upperBound = max(next, lowerBound)
-                }
-            }
     }
 }
 
@@ -1925,7 +1915,7 @@ private struct LadderLayoutProfile {
         compactNodeSize: CGSize(width: 48, height: 40),
         labelCollisionPadding: CGSize(width: 6, height: 4),
         compactCollisionPadding: CGSize(width: 4, height: 4),
-        columnSpacing: 96
+        columnSpacing: 82
     )
 
     /// Inflate every dimension by the rendering counter-scale so collision frames
@@ -1960,10 +1950,17 @@ private struct LadderMetrics {
     let sideLaneWidth: CGFloat
     let axisLineGap: CGFloat
 
-    init(size: CGSize, topClearance: CGFloat = 30, bottomClearance: CGFloat = 34) {
+    init(
+        size: CGSize,
+        topClearance: CGFloat = 30,
+        bottomClearance: CGFloat = 34,
+        verticalVisualOffset: CGFloat = 0
+    ) {
         self.size = size
-        plotTop = topClearance
-        plotBottom = max(plotTop + 720, size.height - bottomClearance)
+        let basePlotTop = topClearance
+        let basePlotBottom = max(basePlotTop + 720, size.height - bottomClearance)
+        plotTop = basePlotTop + verticalVisualOffset
+        plotBottom = basePlotBottom + verticalVisualOffset
         centerX = size.width / 2
         sideLaneWidth = max(340, size.width / 2 - 48)
         axisLineGap = 34
@@ -2772,5 +2769,86 @@ private struct BubbleMorphView: View {
     private func seeded(_ index: Int, salt: Int) -> CGFloat {
         let value = (index * 73 + salt * 151) % 997
         return CGFloat(value) / 996
+    }
+}
+
+private extension View {
+    func dataAlerts(
+        exportedFileURL: Binding<URL?>,
+        exportError: Binding<String?>,
+        importResult: Binding<String?>,
+        showingExportShare: Binding<Bool>
+    ) -> some View {
+        modifier(DataAlertsModifier(
+            exportedFileURL: exportedFileURL,
+            exportError: exportError,
+            importResult: importResult,
+            showingExportShare: showingExportShare
+        ))
+    }
+}
+
+private struct DataAlertsModifier: ViewModifier {
+    @Binding var exportedFileURL: URL?
+    @Binding var exportError: String?
+    @Binding var importResult: String?
+    @Binding var showingExportShare: Bool
+
+    private var showingExportReady: Binding<Bool> {
+        Binding {
+            exportedFileURL != nil && !showingExportShare
+        } set: { isPresented in
+            if !isPresented {
+                exportedFileURL = nil
+            }
+        }
+    }
+
+    private var showingExportError: Binding<Bool> {
+        Binding {
+            exportError != nil
+        } set: { isPresented in
+            if !isPresented {
+                exportError = nil
+            }
+        }
+    }
+
+    private var showingImportResult: Binding<Bool> {
+        Binding {
+            importResult != nil
+        } set: { isPresented in
+            if !isPresented {
+                importResult = nil
+            }
+        }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .alert("导出完成", isPresented: showingExportReady) {
+                Button("分享") {
+                    showingExportShare = true
+                }
+                Button("好", role: .cancel) {
+                    exportedFileURL = nil
+                }
+            } message: {
+                Text("已导出所有数据和图片，可以分享到其他设备或保存到文件 app。")
+            }
+            .alert("导出失败", isPresented: showingExportError) {
+                Button("好", role: .cancel) {
+                    exportError = nil
+                }
+            } message: {
+                Text(exportError ?? "")
+            }
+            .alert("导入完成", isPresented: showingImportResult) {
+                Button("好", role: .cancel) {
+                    importResult = nil
+                }
+            } message: {
+                Text(importResult ?? "")
+            }
     }
 }

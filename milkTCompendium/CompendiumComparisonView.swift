@@ -2,11 +2,11 @@ import SwiftUI
 import UIKit
 
 struct CompendiumComparisonView: View {
-    fileprivate static let minimumZoomScale: CGFloat = 0.44
-    fileprivate static let initialZoomScale: CGFloat = minimumZoomScale
+    fileprivate static let minimumZoomScale: CGFloat = 0.36
+    fileprivate static let initialZoomScale: CGFloat = 0.40
     private static let ladderTopControlClearance: CGFloat = 154
     private static let ladderBottomControlClearance: CGFloat = 42
-    private static let ladderCanvasVerticalSafePadding: CGFloat = 96
+    private static let ladderCanvasVerticalSafePadding: CGFloat = 64
 
     let localDrinks: [Drink]
     let sharedCompendiums: [SharedCompendium]
