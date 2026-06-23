@@ -179,14 +179,8 @@ final class TasteExchangeStatsStore: ObservableObject {
             profile: incomingProfile
         )
 
-        let incomingName = Self.normalizedOwnerName(ownerName)
         stats.peers.removeAll { peer in
             peer.ownerID == ownerID
-                || (
-                    !incomingName.isEmpty
-                        && Self.normalizedOwnerName(peer.ownerName) == incomingName
-                        && Self.likelySameProfile(peer.profile, incomingProfile)
-                )
         }
         stats.peers.append(snapshot)
         stats.peers.sort { $0.lastExchangedAt > $1.lastExchangedAt }
@@ -200,14 +194,8 @@ final class TasteExchangeStatsStore: ObservableObject {
         var normalizedPeers: [TastePeerSnapshot] = []
 
         for peer in stats.peers.sorted(by: { $0.lastExchangedAt > $1.lastExchangedAt }) {
-            let peerName = Self.normalizedOwnerName(peer.ownerName)
             let isDuplicate = normalizedPeers.contains { existing in
                 existing.ownerID == peer.ownerID
-                    || (
-                        !peerName.isEmpty
-                            && Self.normalizedOwnerName(existing.ownerName) == peerName
-                            && Self.likelySameProfile(existing.profile, peer.profile)
-                    )
             }
             if !isDuplicate {
                 normalizedPeers.append(peer)
@@ -227,46 +215,6 @@ final class TasteExchangeStatsStore: ObservableObject {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(stats) else { return }
         try? data.write(to: Self.fileURL, options: .atomic)
-    }
-
-    private static func normalizedOwnerName(_ name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .filter { !$0.isWhitespace }
-    }
-
-    private static func likelySameProfile(_ first: [TasteProfileDrink], _ second: [TasteProfileDrink]) -> Bool {
-        let firstKeys = Set(first.compactMap { drink in
-            let key = normalizedProductKey(brand: drink.brand, name: drink.name)
-            return key.isEmpty ? nil : key
-        })
-        let secondKeys = Set(second.compactMap { drink in
-            let key = normalizedProductKey(brand: drink.brand, name: drink.name)
-            return key.isEmpty ? nil : key
-        })
-        guard !firstKeys.isEmpty, !secondKeys.isEmpty else { return false }
-
-        let overlap = firstKeys.intersection(secondKeys).count
-        let smallerCount = min(firstKeys.count, secondKeys.count)
-        return Double(overlap) / Double(smallerCount) >= 0.45
-    }
-
-    private static func normalizedProductKey(brand: String, name: String) -> String {
-        let normalizedBrand = normalizedProductText(brand)
-        let normalizedName = normalizedProductText(name)
-        guard !normalizedBrand.isEmpty || !normalizedName.isEmpty else { return "" }
-        return "\(normalizedBrand)#\(normalizedName)"
-    }
-
-    private static func normalizedProductText(_ text: String) -> String {
-        let skippedCharacters = CharacterSet.whitespacesAndNewlines
-            .union(.punctuationCharacters)
-            .union(.symbols)
-        let scalars = text
-            .lowercased()
-            .unicodeScalars
-            .filter { !skippedCharacters.contains($0) }
-        return String(String.UnicodeScalarView(scalars))
     }
 }
 

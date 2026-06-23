@@ -282,14 +282,8 @@ final class SharedCompendiumStore: ObservableObject {
     nonisolated private static func deduplicatedStoredCompendiums(_ storedCompendiums: [StoredCompendium]) -> [StoredCompendium] {
         var kept: [StoredCompendium] = []
         for candidate in storedCompendiums.sorted(by: { $0.compendium.exportedAt > $1.compendium.exportedAt }) {
-            let candidateName = normalizedOwnerName(candidate.compendium.ownerName)
             let isDuplicate = kept.contains { existing in
                 existing.compendium.ownerID == candidate.compendium.ownerID
-                    || (
-                        !candidateName.isEmpty
-                            && normalizedOwnerName(existing.compendium.ownerName) == candidateName
-                            && likelySameCompendium(existing.compendium.drinks, candidate.compendium.drinks)
-                    )
             }
 
             if isDuplicate {
@@ -374,13 +368,7 @@ final class SharedCompendiumStore: ObservableObject {
             let manifestData = try encoder.encode(compendium)
             try manifestData.write(to: temporaryDirectory.appendingPathComponent(manifestName), options: .atomic)
 
-            for duplicateDirectory in duplicateOwnerDirectories(for: archive, replacing: ownerDirectory) {
-                try? FileManager.default.removeItem(at: duplicateDirectory)
-            }
-            if FileManager.default.fileExists(atPath: ownerDirectory.path) {
-                try FileManager.default.removeItem(at: ownerDirectory)
-            }
-            try FileManager.default.moveItem(at: temporaryDirectory, to: ownerDirectory)
+            try replaceOwnerDirectory(at: ownerDirectory, with: temporaryDirectory)
             return compendium
         } catch {
             try? FileManager.default.removeItem(at: temporaryDirectory)
@@ -388,84 +376,24 @@ final class SharedCompendiumStore: ObservableObject {
         }
     }
 
-    nonisolated private static func duplicateOwnerDirectories(
-        for archive: SharedCompendiumArchive,
-        replacing ownerDirectory: URL
-    ) -> [URL] {
-        let root = rootDirectory
-        guard let ownerDirectories = try? FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return []
+    nonisolated private static func replaceOwnerDirectory(at ownerDirectory: URL, with temporaryDirectory: URL) throws {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: ownerDirectory.path) else {
+            try fileManager.moveItem(at: temporaryDirectory, to: ownerDirectory)
+            return
         }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let incomingName = normalizedOwnerName(archive.ownerName)
-        guard !incomingName.isEmpty else { return [] }
-
-        return ownerDirectories.compactMap { directory in
-            guard directory.path != ownerDirectory.path else { return nil }
-            let manifestURL = directory.appendingPathComponent(manifestName)
-            guard let data = try? Data(contentsOf: manifestURL),
-                  let existing = try? decoder.decode(SharedCompendium.self, from: data),
-                  existing.ownerID != archive.ownerID,
-                  normalizedOwnerName(existing.ownerName) == incomingName,
-                  likelySameCompendium(existing.drinks, archive.drinks) else {
-                return nil
+        let backupDirectory = rootDirectory.appendingPathComponent(".replace-backup-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.moveItem(at: ownerDirectory, to: backupDirectory)
+        do {
+            try fileManager.moveItem(at: temporaryDirectory, to: ownerDirectory)
+            try? fileManager.removeItem(at: backupDirectory)
+        } catch {
+            if !fileManager.fileExists(atPath: ownerDirectory.path) {
+                try? fileManager.moveItem(at: backupDirectory, to: ownerDirectory)
             }
-            return directory
+            throw error
         }
-    }
-
-    nonisolated private static func normalizedOwnerName(_ name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-            .filter { !$0.isWhitespace }
-    }
-
-    nonisolated private static func likelySameCompendium(
-        _ existingDrinks: [SharedDrink],
-        _ incomingDrinks: [SharedDrinkArchive]
-    ) -> Bool {
-        likelySameProductKeySet(
-            existingDrinks.compactMap { drink in
-                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
-                return key.isEmpty ? nil : key
-            },
-            incomingDrinks.compactMap { drink in
-                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
-                return key.isEmpty ? nil : key
-            }
-        )
-    }
-
-    nonisolated private static func likelySameCompendium(
-        _ existingDrinks: [SharedDrink],
-        _ incomingDrinks: [SharedDrink]
-    ) -> Bool {
-        likelySameProductKeySet(
-            existingDrinks.compactMap { drink in
-                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
-                return key.isEmpty ? nil : key
-            },
-            incomingDrinks.compactMap { drink in
-                let key = normalizedProductKey(brand: drink.brand, name: drink.name)
-                return key.isEmpty ? nil : key
-            }
-        )
-    }
-
-    nonisolated private static func likelySameProductKeySet(_ firstKeys: [String], _ secondKeys: [String]) -> Bool {
-        let firstKeys = Set(firstKeys)
-        let secondKeys = Set(secondKeys)
-        guard !firstKeys.isEmpty, !secondKeys.isEmpty else { return false }
-
-        let overlap = firstKeys.intersection(secondKeys).count
-        let smallerCount = min(firstKeys.count, secondKeys.count)
-        return Double(overlap) / Double(smallerCount) >= 0.45
     }
 
     nonisolated private static func normalizedProductKey(brand: String, name: String) -> String {
