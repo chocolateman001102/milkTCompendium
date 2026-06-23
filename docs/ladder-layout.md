@@ -8,6 +8,12 @@
 
 这三个模块高度耦合。每次修改首页天梯、图标尺寸、缩放比例、碰撞框、列距、zIndex、或标签显示逻辑时，都必须联动检查本文件记录的约束。
 
+## 本次布局调整
+
+- 首页天梯的初始视觉位置通过 `CollectionView.initialLadderVisualYOffset` 下移绘制坐标，而不是依赖 `UIScrollView` 的初始 `contentOffset`。这样打开首页时会露出更多天梯顶部区域。
+- `LadderMetrics` 接收 `verticalVisualOffset`，并同时下移 `plotTop` / `plotBottom`，保证评分轴和饮品节点整体同步移动。
+- `LadderLayoutProfile.stable.columnSpacing` 调整为 `82`，让多列饮品排布比原先更紧凑一些，同时保留碰撞检测的安全距离。
+
 ## 当前布局原则
 
 1. 图标排布优先保证评分位置准确。
