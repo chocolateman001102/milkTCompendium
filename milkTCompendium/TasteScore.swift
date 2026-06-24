@@ -188,6 +188,18 @@ final class TasteExchangeStatsStore: ObservableObject {
         save()
     }
 
+    func removePeer(ownerID: String) {
+        guard !ownerID.isEmpty else { return }
+        let originalPeerCount = stats.peers.count
+        stats.peers.removeAll { peer in
+            peer.ownerID == ownerID
+        }
+        stats.successfulExchangeCount = stats.peers.count
+        if stats.peers.count != originalPeerCount {
+            save()
+        }
+    }
+
     private func normalizePeerSnapshots() {
         let originalPeerCount = stats.peers.count
         let originalExchangeCount = stats.successfulExchangeCount

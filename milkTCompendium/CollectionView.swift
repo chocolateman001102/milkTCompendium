@@ -35,6 +35,8 @@ struct CollectionView: View {
     @State private var selectedCompendiumID = "mine"
     @State private var comparisonOwnerID: String?
     @State private var showingTransfer = false
+    @State private var pendingDeleteCompendium: SharedCompendium?
+    @State private var sharedCompendiumMessage: String?
     @State private var draggingItem: LadderDrinkDisplayItem?
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
@@ -153,25 +155,29 @@ struct CollectionView: View {
             selectedBrandFilter ?? "*",
             String(format: "%.1f-%.1f", selectedRatingLowerBound, selectedRatingUpperBound)
         ].joined(separator: "#")
-        let itemKey = items.map { item in
-            [
-                item.id,
-                String(format: "%.3f", item.rating),
-                item.brand,
-                item.name,
-                item.sweetness,
-                item.iceLevel,
-                String(format: "%.3f", item.consumedAt.timeIntervalSince1970),
-                item.location,
-                item.note,
-                item.isLimited ? "1" : "0",
-                "\(item.cupCount)",
-                item.stickerImageName ?? item.stickerFileURL?.lastPathComponent ?? "",
-                String(format: "%.3f", item.createdAt.timeIntervalSince1970)
-            ].joined(separator: "#")
+        return "\(filterKey):\(itemsCacheSignature(for: items))"
+    }
+
+    private func itemsCacheSignature(for items: [LadderDrinkDisplayItem]) -> Int {
+        var hasher = Hasher()
+        hasher.combine(items.count)
+        for item in items {
+            hasher.combine(item.id)
+            hasher.combine(item.rating)
+            hasher.combine(item.brand)
+            hasher.combine(item.name)
+            hasher.combine(item.sweetness)
+            hasher.combine(item.iceLevel)
+            hasher.combine(item.consumedAt.timeIntervalSince1970)
+            hasher.combine(item.location)
+            hasher.combine(item.note)
+            hasher.combine(item.isLimited)
+            hasher.combine(item.cupCount)
+            hasher.combine(item.stickerImageName)
+            hasher.combine(item.stickerFileURL?.lastPathComponent)
+            hasher.combine(item.createdAt.timeIntervalSince1970)
         }
-        .joined(separator: "|")
-        return "\(filterKey):\(itemKey)"
+        return hasher.finalize()
     }
 
     private static func brandOptions(from items: [LadderDrinkDisplayItem]) -> [String] {
@@ -234,6 +240,9 @@ struct CollectionView: View {
                 hasActiveFilter: hasActiveFilter,
                 onSwitchCompendium: switchCompendium,
                 onCompareCompendium: openComparison,
+                onDeleteCompendium: { compendium in
+                    pendingDeleteCompendium = compendium
+                },
                 onOpenProfile: { showingTransfer = true },
                 onClear: clearFilters
             )
@@ -312,8 +321,36 @@ struct CollectionView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                         openComparison(compendium)
                     }
+                },
+                onDeleted: { compendium in
+                    clearStateForDeletedSharedCompendium(compendium)
                 }
             )
+        }
+        .confirmationDialog(
+            "删除好友档案？",
+            isPresented: Binding(
+                get: { pendingDeleteCompendium != nil },
+                set: { if !$0 { pendingDeleteCompendium = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingDeleteCompendium {
+                Button("删除 \(pendingDeleteCompendium.ownerName) 的档案", role: .destructive) {
+                    deleteSharedCompendium(pendingDeleteCompendium)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会删除已经交换来的档案、相关贴纸和交换统计。此操作不能撤销。")
+        }
+        .alert("档案", isPresented: Binding(
+            get: { sharedCompendiumMessage != nil },
+            set: { if !$0 { sharedCompendiumMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(sharedCompendiumMessage ?? "")
         }
         .dismissKeyboardOnTap()
     }
@@ -693,30 +730,12 @@ struct CollectionView: View {
 
     private func ladderLayoutCacheKey(for viewport: CGSize) -> String {
         let viewportKey = "\(Int(viewport.width.rounded()))x\(Int(viewport.height.rounded()))"
-        let itemKey = filteredDisplayItems.map { item in
-            [
-                item.id,
-                String(format: "%.3f", item.rating),
-                item.brand,
-                item.name,
-                item.sweetness,
-                item.iceLevel,
-                String(format: "%.3f", item.consumedAt.timeIntervalSince1970),
-                item.location,
-                item.note,
-                item.isLimited ? "1" : "0",
-                "\(item.cupCount)",
-                item.stickerImageName ?? item.stickerFileURL?.lastPathComponent ?? "",
-                String(format: "%.3f", item.createdAt.timeIntervalSince1970)
-            ].joined(separator: "#")
-        }
-        .joined(separator: "|")
         let filterKey = [
             normalizedSearchText,
             selectedBrandFilter ?? "*",
             String(format: "%.1f-%.1f", selectedRatingLowerBound, selectedRatingUpperBound)
         ].joined(separator: "#")
-        return "\(selectedCompendiumID):\(viewportKey):\(filterKey):\(itemKey)"
+        return "\(selectedCompendiumID):\(viewportKey):\(filterKey):\(itemsCacheSignature(for: filteredDisplayItems))"
     }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
@@ -1121,6 +1140,32 @@ struct CollectionView: View {
         try? modelContext.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
+
+    private func deleteSharedCompendium(_ compendium: SharedCompendium) {
+        clearStateForDeletedSharedCompendium(compendium)
+        Task {
+            do {
+                try await sharedStore.deleteCompendium(ownerID: compendium.ownerID)
+                tasteStatsStore.removePeer(ownerID: compendium.ownerID)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch {
+                sharedCompendiumMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func clearStateForDeletedSharedCompendium(_ compendium: SharedCompendium) {
+        if selectedCompendiumID == compendium.id {
+            switchCompendium(to: "mine")
+        }
+        if comparisonOwnerID == compendium.ownerID {
+            comparisonOwnerID = nil
+        }
+        selectedItem = nil
+        draggingItem = nil
+        dragTranslation = .zero
+        isOverDeleteTarget = false
+    }
 }
 
 private struct LadderTopDock: View {
@@ -1143,6 +1188,7 @@ private struct LadderTopDock: View {
     let hasActiveFilter: Bool
     let onSwitchCompendium: (String) -> Void
     let onCompareCompendium: (SharedCompendium) -> Void
+    let onDeleteCompendium: (SharedCompendium) -> Void
     let onOpenProfile: () -> Void
     let onClear: () -> Void
 
@@ -1241,6 +1287,12 @@ private struct LadderTopDock: View {
                     onSwitchCompendium(compendium.id)
                 } label: {
                     compendiumMenuTitle(compendium.ownerName, isSelected: selectedCompendiumID == compendium.id)
+                }
+
+                Button(role: .destructive) {
+                    onDeleteCompendium(compendium)
+                } label: {
+                    Label("删除 \(compendium.ownerName) 的档案", systemImage: "trash")
                 }
             }
         } label: {
@@ -2593,45 +2645,59 @@ private struct BubbleMorphView: View {
     private let targetTransitionDuration: TimeInterval = 0.32
 
     var body: some View {
-        TimelineView(.animation) { timeline in
-            Canvas { context, size in
-                let elapsed = timeline.date.timeIntervalSinceReferenceDate
-                let easedProgress = easeInOut(progress)
-                let targetTransition = transitionProgress(at: timeline.date)
-
-                for index in 0..<particleCount {
-                    let start = startPoint(index: index, size: size)
-                    let finish = morphedTargetPoint(index: index, size: size, targetTransition: targetTransition)
-                    let delay = CGFloat(index % 11) * 0.01
-                    let localProgress = min(1, max(0, (easedProgress - delay) / (1 - delay)))
-                    let drift = driftOffset(index: index, elapsed: elapsed, progress: localProgress)
-                    let point = CGPoint(
-                        x: start.x + (finish.x - start.x) * localProgress + drift.width,
-                        y: start.y + (finish.y - start.y) * localProgress + drift.height
-                    )
-                    let radius = 1.05 + localProgress * 0.5
-                    let breakIn = min(1, max(0, easedProgress / 0.14))
-                    let opacity = Double(breakIn) * (0.34 + Double(localProgress) * 0.62)
-                    let colorMix = min(1, max(0, highlightProgress))
-                    let color = Color(
-                        red: 0.02 + 0.02 * colorMix,
-                        green: 0.02 + 0.32 * colorMix,
-                        blue: 0.02 + 0.88 * colorMix
-                    )
-                    let rect = CGRect(
-                        x: point.x - radius,
-                        y: point.y - radius,
-                        width: radius * 2,
-                        height: radius * 2
-                    )
-
-                    context.opacity = opacity
-                    context.fill(Path(ellipseIn: rect), with: .color(color))
+        Group {
+            if isAnimating {
+                TimelineView(.animation) { timeline in
+                    particleCanvas(date: timeline.date)
                 }
+            } else {
+                particleCanvas(date: targetTransitionStartedAt)
             }
         }
         .frame(width: size.width, height: size.height)
         .allowsHitTesting(false)
+    }
+
+    private var isAnimating: Bool {
+        progress > 0 || previousTarget != target || highlightProgress > 0
+    }
+
+    private func particleCanvas(date: Date) -> some View {
+        Canvas { context, size in
+            let elapsed = date.timeIntervalSinceReferenceDate
+            let easedProgress = easeInOut(progress)
+            let targetTransition = transitionProgress(at: date)
+
+            for index in 0..<particleCount {
+                let start = startPoint(index: index, size: size)
+                let finish = morphedTargetPoint(index: index, size: size, targetTransition: targetTransition)
+                let delay = CGFloat(index % 11) * 0.01
+                let localProgress = min(1, max(0, (easedProgress - delay) / (1 - delay)))
+                let drift = driftOffset(index: index, elapsed: elapsed, progress: localProgress)
+                let point = CGPoint(
+                    x: start.x + (finish.x - start.x) * localProgress + drift.width,
+                    y: start.y + (finish.y - start.y) * localProgress + drift.height
+                )
+                let radius = 1.05 + localProgress * 0.5
+                let breakIn = min(1, max(0, easedProgress / 0.14))
+                let opacity = Double(breakIn) * (0.34 + Double(localProgress) * 0.62)
+                let colorMix = min(1, max(0, highlightProgress))
+                let color = Color(
+                    red: 0.02 + 0.02 * colorMix,
+                    green: 0.02 + 0.32 * colorMix,
+                    blue: 0.02 + 0.88 * colorMix
+                )
+                let rect = CGRect(
+                    x: point.x - radius,
+                    y: point.y - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                )
+
+                context.opacity = opacity
+                context.fill(Path(ellipseIn: rect), with: .color(color))
+            }
+        }
     }
 
     private func startPoint(index: Int, size: CGSize) -> CGPoint {

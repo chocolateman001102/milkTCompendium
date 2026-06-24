@@ -6,6 +6,7 @@ struct NearbyTransferView: View {
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
     let onImported: (SharedCompendium) -> Void
     let onCompare: (SharedCompendium) -> Void
+    let onDeleted: (SharedCompendium) -> Void
 
     @AppStorage("NearbyTransferDisplayName") private var savedDisplayName = NearbyDisplayNameStore.displayName
 
@@ -21,7 +22,8 @@ struct NearbyTransferView: View {
                 savedDisplayName = cleaned
             },
             onImported: onImported,
-            onCompare: onCompare
+            onCompare: onCompare,
+            onDeleted: onDeleted
         )
         .id(savedDisplayName)
         .dismissKeyboardOnTap()
@@ -31,8 +33,8 @@ struct NearbyTransferView: View {
 private struct NearbyTransferSessionView: View {
     enum PeerFilter: String, CaseIterable, Identifiable {
         case all = "全部"
-        case notImported = "未导入"
-        case imported = "已导入"
+        case notImported = "还没交换"
+        case imported = "已经交换"
 
         var id: String { rawValue }
     }
@@ -44,10 +46,12 @@ private struct NearbyTransferSessionView: View {
     let onSaveDisplayName: (String) -> Void
     let onImported: (SharedCompendium) -> Void
     let onCompare: (SharedCompendium) -> Void
+    let onDeleted: (SharedCompendium) -> Void
 
     @StateObject private var manager: NearbyTransferManager
     @State private var message: String?
     @State private var selectedPeer: NearbyPeer?
+    @State private var pendingDeleteCompendium: SharedCompendium?
     @State private var searchText = ""
     @State private var filter: PeerFilter = .all
     @State private var showingDisplayNameEditor = false
@@ -60,7 +64,8 @@ private struct NearbyTransferSessionView: View {
         displayName: String,
         onSaveDisplayName: @escaping (String) -> Void,
         onImported: @escaping (SharedCompendium) -> Void,
-        onCompare: @escaping (SharedCompendium) -> Void
+        onCompare: @escaping (SharedCompendium) -> Void,
+        onDeleted: @escaping (SharedCompendium) -> Void
     ) {
         self.drinks = drinks
         self.sharedStore = sharedStore
@@ -69,6 +74,7 @@ private struct NearbyTransferSessionView: View {
         self.onSaveDisplayName = onSaveDisplayName
         self.onImported = onImported
         self.onCompare = onCompare
+        self.onDeleted = onDeleted
         _manager = StateObject(wrappedValue: NearbyTransferManager(summary: Self.summary(for: drinks, displayName: displayName)))
     }
 
@@ -78,6 +84,7 @@ private struct NearbyTransferSessionView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     myCard
                     statusCard
+                    exchangedArchivesSection
                     controls
                     partyWall
                 }
@@ -133,6 +140,25 @@ private struct NearbyTransferSessionView: View {
                     }
                 )
             }
+            .confirmationDialog(
+                "删除已经交换来的档案？",
+                isPresented: Binding(
+                    get: { pendingDeleteCompendium != nil },
+                    set: { if !$0 { pendingDeleteCompendium = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                if let pendingDeleteCompendium {
+                    Button("删除 \(pendingDeleteCompendium.ownerName) 的档案", role: .destructive) {
+                        deleteSharedCompendium(pendingDeleteCompendium)
+                    }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                if let pendingDeleteCompendium {
+                    Text("这会删除 \(pendingDeleteCompendium.ownerName) 已经交换来的档案、相关贴纸和交换统计。此操作不能撤销。")
+                }
+            }
             .sheet(item: $selectedPeer) { peer in
                 PeerExchangePanel(
                     peer: peer,
@@ -145,12 +171,16 @@ private struct NearbyTransferSessionView: View {
                         manager.exchange(with: peer)
                         selectedPeer = nil
                     },
+                    onDelete: { compendium in
+                        selectedPeer = nil
+                        pendingDeleteCompendium = compendium
+                    },
                     onDisconnect: {
                         manager.disconnect(from: peer)
                         selectedPeer = nil
                     }
                 )
-                .presentationDetents([.height(importedCompendium(for: peer) == nil ? 250 : 310)])
+                .presentationDetents([.height(importedCompendium(for: peer) == nil ? 250 : 370)])
             }
             .sheet(isPresented: $showingDisplayNameEditor) {
                 DisplayNameEditor(
@@ -381,6 +411,51 @@ private struct NearbyTransferSessionView: View {
         .shadow(color: isActive ? Color.orange.opacity(0.18) : .clear, radius: 20, y: 8)
     }
 
+    private var exchangedArchivesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("已经交换来的档案")
+                    .font(.headline.weight(.black))
+                Spacer()
+                Text("\(sharedStore.compendiums.count) 个")
+                    .font(.caption.weight(.bold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            if sharedStore.compendiums.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("还没有交换来的档案")
+                        .font(.subheadline.weight(.semibold))
+                    Text("和朋友交换后，档案会出现在这里，也可以从这里删除。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(.black.opacity(0.07), lineWidth: 1)
+                )
+            } else {
+                VStack(spacing: 10) {
+                    ForEach(sharedStore.compendiums) { compendium in
+                        ExchangedArchiveRow(
+                            compendium: compendium,
+                            onCompare: {
+                                onCompare(compendium)
+                            },
+                            onDelete: {
+                                pendingDeleteCompendium = compendium
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     private var controls: some View {
         VStack(spacing: 9) {
             HStack(spacing: 8) {
@@ -497,9 +572,19 @@ private struct NearbyTransferSessionView: View {
         .map { $0 }
     }
 
+    private var importedOwnerIDs: Set<String> {
+        Set(sharedStore.compendiums.map(\.ownerID))
+    }
+
+    private var compendiumsByOwnerID: [String: SharedCompendium] {
+        Dictionary(uniqueKeysWithValues: sharedStore.compendiums.map { ($0.ownerID, $0) })
+    }
+
     private var filteredPeers: [NearbyPeer] {
-        manager.peers.filter { peer in
-            let imported = importedCompendium(for: peer) != nil
+        let importedOwnerIDs = importedOwnerIDs
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return manager.peers.filter { peer in
+            let imported = importedOwnerIDs.contains(peer.stableID)
             let matchesFilter = switch filter {
             case .all:
                 true
@@ -508,18 +593,17 @@ private struct NearbyTransferSessionView: View {
             case .imported:
                 imported
             }
-            let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             let matchesSearch = query.isEmpty || peer.name.localizedCaseInsensitiveContains(query)
             return matchesFilter && matchesSearch
         }
     }
 
     private func isImported(_ peer: NearbyPeer) -> Bool {
-        importedCompendium(for: peer) != nil
+        importedOwnerIDs.contains(peer.stableID)
     }
 
     private func importedCompendium(for peer: NearbyPeer) -> SharedCompendium? {
-        sharedStore.compendiums.first { $0.ownerID == peer.stableID }
+        compendiumsByOwnerID[peer.stableID]
     }
 
     private func makePackageData() async throws -> Data {
@@ -546,8 +630,21 @@ private struct NearbyTransferSessionView: View {
                 )
                 onImported(compendium)
                 message = existingOwnerIDs.contains(compendium.ownerID)
-                    ? "已更新 \(compendium.ownerName) 的档案"
-                    : "已导入 \(compendium.ownerName) 的档案"
+                    ? "已更新 \(compendium.ownerName) 已经交换来的档案"
+                    : "已保存 \(compendium.ownerName) 已经交换来的档案"
+            } catch {
+                message = error.localizedDescription
+            }
+        }
+    }
+
+    private func deleteSharedCompendium(_ compendium: SharedCompendium) {
+        Task {
+            do {
+                try await sharedStore.deleteCompendium(ownerID: compendium.ownerID)
+                tasteStatsStore.removePeer(ownerID: compendium.ownerID)
+                onDeleted(compendium)
+                message = "已删除 \(compendium.ownerName) 已经交换来的档案"
             } catch {
                 message = error.localizedDescription
             }
@@ -574,6 +671,66 @@ private struct FavoriteBrandSummary: Identifiable {
 
     var id: String {
         brand
+    }
+}
+
+private struct ExchangedArchiveRow: View {
+    let compendium: SharedCompendium
+    let onCompare: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.green.opacity(0.16))
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.green)
+            }
+            .frame(width: 42, height: 42)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(compendium.ownerName)
+                    .font(.subheadline.weight(.black))
+                    .lineLimit(1)
+                Text("\(cupCount) 杯 · \(compendium.drinks.count) 项 · 已经交换来的档案")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(action: onCompare) {
+                Image(systemName: "rectangle.split.2x1")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.bordered)
+            .clipShape(Circle())
+            .accessibilityLabel("查看 \(compendium.ownerName) 的共饮")
+
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "trash")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.bordered)
+            .clipShape(Circle())
+            .accessibilityLabel("删除 \(compendium.ownerName) 的档案")
+        }
+        .padding(12)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.black.opacity(0.07), lineWidth: 1)
+        )
+    }
+
+    private var cupCount: Int {
+        compendium.drinks.map { max(1, $0.cupCount) }.reduce(0, +)
     }
 }
 
@@ -679,7 +836,7 @@ private struct PeerCard: View {
                     Text(peer.name)
                         .font(.headline.weight(.black))
                         .lineLimit(1)
-                    Text(isImported ? "已在共享图鉴，可更新" : "可交换档案")
+                    Text(isImported ? "已经交换来的档案，可更新" : "可交换档案")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(isImported ? .green : .secondary)
                 }
@@ -724,6 +881,7 @@ private struct PeerExchangePanel: View {
     let importedCompendium: SharedCompendium?
     let onCompare: (SharedCompendium) -> Void
     let onExchange: () -> Void
+    let onDelete: (SharedCompendium) -> Void
     let onDisconnect: () -> Void
 
     private var isImported: Bool {
@@ -740,7 +898,7 @@ private struct PeerExchangePanel: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(peer.name)
                     .font(.title2.weight(.black))
-                Text("\(peer.drinkCount) 总杯 · 均分 \(String(format: "%.2f", peer.averageRating)) · \(isImported ? "已导入" : "未导入")")
+                Text("\(peer.drinkCount) 总杯 · 均分 \(String(format: "%.2f", peer.averageRating)) · \(isImported ? "已经交换来的档案" : "还没交换过档案")")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
@@ -756,9 +914,18 @@ private struct PeerExchangePanel: View {
                 .controlSize(.large)
             }
 
-            if isImported {
+            if let importedCompendium {
                 Button(action: onExchange) {
                     Label("交换并更新档案", systemImage: "arrow.triangle.2.circlepath.circle.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+
+                Button(role: .destructive) {
+                    onDelete(importedCompendium)
+                } label: {
+                    Label("删除已经交换来的档案", systemImage: "trash")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
