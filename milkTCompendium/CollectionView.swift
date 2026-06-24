@@ -4,6 +4,13 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private enum TemporaryFeatureFlags {
+    /// TODO: TEMP-IMPORT-OTHER-COMPENDIUM
+    /// Temporary QA-only entry point for importing another user's .mtcpack as a shared compendium.
+    /// Remove after cross-owner import testing is complete.
+    static let enableCrossOwnerCompendiumImportForTesting = true
+}
+
 private struct CollectionDerivedData {
     var displayItems: [LadderDrinkDisplayItem]
     var filteredItems: [LadderDrinkDisplayItem]
@@ -36,6 +43,7 @@ struct CollectionView: View {
     @State private var selectedCompendiumID = "mine"
     @State private var comparisonOwnerID: String?
     @State private var showingTransfer = false
+    @State private var pendingBackupExportAfterTransferDismiss = false
     @State private var pendingDeleteCompendium: SharedCompendium?
     @State private var sharedCompendiumMessage: String?
     @State private var draggingItem: LadderDrinkDisplayItem?
@@ -51,9 +59,11 @@ struct CollectionView: View {
     @State private var showingExportShare = false
     @State private var exportedFileURL: URL?
     @State private var showingImportPicker = false
+    @State private var showingTemporaryCrossOwnerImportPicker = false
     @State private var isExporting = false
     @State private var isImporting = false
     @State private var importResult: String?
+    @State private var temporaryCrossOwnerImportMessage: String?
     @State private var exportError: String?
     @StateObject private var derivedDataCache = CollectionDerivedDataCache()
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
@@ -248,7 +258,14 @@ struct CollectionView: View {
                     }
                 },
                 onImport: {
-                    showingImportPicker = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        showingImportPicker = true
+                    }
+                },
+                onTemporaryCrossOwnerImport: {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        showingTemporaryCrossOwnerImportPicker = true
+                    }
                 },
                 onClear: clearFilters
             )
@@ -262,6 +279,17 @@ struct CollectionView: View {
         }
         .onChange(of: brandFilterOptions) { _, _ in
             validateBrandFilter()
+        }
+        .onChange(of: showingTransfer) { _, isShowing in
+            guard !isShowing else { return }
+            if pendingBackupExportAfterTransferDismiss {
+                pendingBackupExportAfterTransferDismiss = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    Task {
+                        await exportData()
+                    }
+                }
+            }
         }
         .overlay(alignment: .bottomTrailing) {
             CaptureBookmark(onCapture: {
@@ -317,6 +345,16 @@ struct CollectionView: View {
                 drinks: drinks,
                 sharedStore: sharedStore,
                 tasteStatsStore: tasteStatsStore,
+                canExportBackup: !drinks.isEmpty,
+                onImportBackup: { url in
+                    Task {
+                        await importData(from: url)
+                    }
+                },
+                onExportBackup: {
+                    pendingBackupExportAfterTransferDismiss = true
+                    showingTransfer = false
+                },
                 onImported: { compendium in
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.86)) {
                         switchCompendium(to: compendium.id)
@@ -379,9 +417,32 @@ struct CollectionView: View {
                 Task {
                     await importData(from: url)
                 }
-            case .failure:
-                break
+            case .failure(let error):
+                importResult = "导入失败: \(error.localizedDescription)"
             }
+        }
+        .fileImporter(
+            isPresented: $showingTemporaryCrossOwnerImportPicker,
+            allowedContentTypes: [.milkTCompendiumPackage, .data],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                Task {
+                    await importTemporaryCrossOwnerCompendium(from: url)
+                }
+            case .failure(let error):
+                temporaryCrossOwnerImportMessage = "导入失败: \(error.localizedDescription)"
+            }
+        }
+        .alert("测试导入", isPresented: Binding(
+            get: { temporaryCrossOwnerImportMessage != nil },
+            set: { if !$0 { temporaryCrossOwnerImportMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(temporaryCrossOwnerImportMessage ?? "")
         }
         .dataAlerts(
             exportedFileURL: $exportedFileURL,
@@ -487,6 +548,7 @@ struct CollectionView: View {
                         Label(compendium.ownerName, systemImage: selectedCompendiumID == compendium.id ? "checkmark" : "book")
                     }
                 }
+
             } label: {
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 1) {
@@ -810,6 +872,13 @@ struct CollectionView: View {
         isImporting = true
         defer { isImporting = false }
 
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
         do {
             let result = try await DataMigrationManager.importBackup(
                 from: url,
@@ -826,6 +895,26 @@ struct CollectionView: View {
         }
     }
 
+    // TODO: TEMP-IMPORT-OTHER-COMPENDIUM
+    private func importTemporaryCrossOwnerCompendium(from url: URL) async {
+        let didAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        do {
+            let compendium = try await sharedStore.importArchive(at: url)
+            await MainActor.run {
+                temporaryCrossOwnerImportMessage = "已导入为共享图鉴：\(compendium.ownerName)。"
+            }
+        } catch {
+            await MainActor.run {
+                temporaryCrossOwnerImportMessage = "导入失败: \(error.localizedDescription)"
+            }
+        }
+    }
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
         let drinkCount = CGFloat(max(filteredDisplayItems.count, 1))
@@ -1281,6 +1370,7 @@ private struct LadderTopDock: View {
     let onOpenProfile: () -> Void
     let onExport: () -> Void
     let onImport: () -> Void
+    let onTemporaryCrossOwnerImport: () -> Void
     let onClear: () -> Void
 
     var body: some View {
@@ -1294,28 +1384,8 @@ private struct LadderTopDock: View {
                         compareMenu
                     }
 
-                    Menu {
-                        Button {
-                            onOpenProfile()
-                        } label: {
-                            Label("线下互传", systemImage: "dot.radiowaves.left.and.right")
-                        }
-
-                        Divider()
-
-                        Button {
-                            onExport()
-                        } label: {
-                            Label("导出备份", systemImage: "square.and.arrow.up")
-                        }
-                        .disabled(isExporting || !canExport)
-
-                        Button {
-                            onImport()
-                        } label: {
-                            Label("导入备份", systemImage: "square.and.arrow.down")
-                        }
-                        .disabled(isImporting)
+                    Button {
+                        onOpenProfile()
                     } label: {
                         dockIcon(systemName: "ellipsis", isActive: true)
                     }
@@ -1401,6 +1471,16 @@ private struct LadderTopDock: View {
                 } label: {
                     compendiumMenuTitle(compendium.ownerName, isSelected: selectedCompendiumID == compendium.id)
                 }
+            }
+
+            if TemporaryFeatureFlags.enableCrossOwnerCompendiumImportForTesting {
+                Divider()
+                Button {
+                    onTemporaryCrossOwnerImport()
+                } label: {
+                    Label("测试：导入他人图鉴", systemImage: "person.2.badge.plus")
+                }
+                // TODO: TEMP-IMPORT-OTHER-COMPENDIUM
             }
         } label: {
             HStack(spacing: 7) {

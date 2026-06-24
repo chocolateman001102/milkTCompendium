@@ -1,9 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NearbyTransferView: View {
     let drinks: [Drink]
     let sharedStore: SharedCompendiumStore
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
+    let canExportBackup: Bool
+    let onImportBackup: (URL) -> Void
+    let onExportBackup: () -> Void
     let onImported: (SharedCompendium) -> Void
     let onCompare: (SharedCompendium) -> Void
     let onDeleted: (SharedCompendium) -> Void
@@ -21,6 +25,9 @@ struct NearbyTransferView: View {
                 NearbyDisplayNameStore.displayName = cleaned
                 savedDisplayName = cleaned
             },
+            canExportBackup: canExportBackup,
+            onImportBackup: onImportBackup,
+            onExportBackup: onExportBackup,
             onImported: onImported,
             onCompare: onCompare,
             onDeleted: onDeleted
@@ -44,6 +51,9 @@ private struct NearbyTransferSessionView: View {
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
     let displayName: String
     let onSaveDisplayName: (String) -> Void
+    let canExportBackup: Bool
+    let onImportBackup: (URL) -> Void
+    let onExportBackup: () -> Void
     let onImported: (SharedCompendium) -> Void
     let onCompare: (SharedCompendium) -> Void
     let onDeleted: (SharedCompendium) -> Void
@@ -55,7 +65,7 @@ private struct NearbyTransferSessionView: View {
     @State private var searchText = ""
     @State private var filter: PeerFilter = .all
     @State private var showingDisplayNameEditor = false
-    @State private var showingTemporaryLocalImport = false
+    @State private var showingBackupImportPicker = false
 
     init(
         drinks: [Drink],
@@ -63,6 +73,9 @@ private struct NearbyTransferSessionView: View {
         tasteStatsStore: TasteExchangeStatsStore,
         displayName: String,
         onSaveDisplayName: @escaping (String) -> Void,
+        canExportBackup: Bool,
+        onImportBackup: @escaping (URL) -> Void,
+        onExportBackup: @escaping () -> Void,
         onImported: @escaping (SharedCompendium) -> Void,
         onCompare: @escaping (SharedCompendium) -> Void,
         onDeleted: @escaping (SharedCompendium) -> Void
@@ -72,6 +85,9 @@ private struct NearbyTransferSessionView: View {
         self.tasteStatsStore = tasteStatsStore
         self.displayName = displayName
         self.onSaveDisplayName = onSaveDisplayName
+        self.canExportBackup = canExportBackup
+        self.onImportBackup = onImportBackup
+        self.onExportBackup = onExportBackup
         self.onImported = onImported
         self.onCompare = onCompare
         self.onDeleted = onDeleted
@@ -103,10 +119,17 @@ private struct NearbyTransferSessionView: View {
                         }
 
                         Button {
-                            showingTemporaryLocalImport = true
+                            showingBackupImportPicker = true
                         } label: {
-                            Label("临时导入到本地图鉴", systemImage: "square.and.arrow.down")
+                            Label("导入备份", systemImage: "square.and.arrow.down")
                         }
+
+                        Button {
+                            onExportBackup()
+                        } label: {
+                            Label("导出备份", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(!canExportBackup)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -194,8 +217,18 @@ private struct NearbyTransferSessionView: View {
                 )
                 .presentationDetents([.height(230)])
             }
-            .sheet(isPresented: $showingTemporaryLocalImport) {
-                TemporaryLocalArchiveImportView()
+            .fileImporter(
+                isPresented: $showingBackupImportPicker,
+                allowedContentTypes: [.milkTCompendiumPackage, .data],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    onImportBackup(url)
+                case .failure(let error):
+                    message = "导入失败: \(error.localizedDescription)"
+                }
             }
         }
     }

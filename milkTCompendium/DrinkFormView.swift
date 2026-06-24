@@ -130,7 +130,7 @@ struct DrinkFormView: View {
                     guard let data = try await item.loadTransferable(type: Data.self) else {
                         throw ProcessingError.invalidImage
                     }
-                    let image = try data.downsampledImage(maxDimension: 3_000)
+                    let image = try data.downsampledImage(maxDimension: 4_000)
                     await process(image)
                 } catch {
                     errorMessage = error.localizedDescription
@@ -562,7 +562,7 @@ private struct StickerPreviewView: View {
 private extension UIImage {
     func preparedForDrinkForm() -> UIImage {
         let longestSide = max(size.width, size.height)
-        let ratio = min(1, 3_000 / longestSide)
+        let ratio = min(1, 4_000 / longestSide)
         let targetSize = CGSize(width: size.width * ratio, height: size.height * ratio)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1

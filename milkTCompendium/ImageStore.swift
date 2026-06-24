@@ -24,7 +24,7 @@ enum ImageStore {
 
     static func saveOriginal(_ image: UIImage) throws -> String {
         let name = UUID().uuidString + ".jpg"
-        guard let data = image.jpegData(compressionQuality: 0.86) else {
+        guard let data = image.jpegData(compressionQuality: 0.92) else {
             throw ImageStoreError.encodingFailed
         }
         try data.write(to: directory.appendingPathComponent(name), options: .atomic)

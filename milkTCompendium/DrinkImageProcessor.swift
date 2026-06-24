@@ -10,7 +10,7 @@ struct ProcessedDrinkImage {
 enum DrinkImageProcessor {
     static func process(_ image: UIImage) async throws -> ProcessedDrinkImage {
         let normalizedImage = image
-            .resizedAndNormalizedToFit(maxDimension: 2_400)
+            .resizedAndNormalizedToFit(maxDimension: 3_200)
         guard let cgImage = normalizedImage.cgImage else {
             throw ProcessingError.invalidImage
         }
