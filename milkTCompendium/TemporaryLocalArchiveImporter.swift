@@ -255,6 +255,6 @@ struct TemporaryLocalArchiveImportView: View {
     }
 }
 
-private extension UTType {
+extension UTType {
     static let milkTCompendiumPackage = UTType(exportedAs: "com.yangchen.milktcompendium.package")
 }

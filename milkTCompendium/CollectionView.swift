@@ -2,6 +2,7 @@ import Combine
 import SwiftData
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 private struct CollectionDerivedData {
     var displayItems: [LadderDrinkDisplayItem]
@@ -35,6 +36,8 @@ struct CollectionView: View {
     @State private var selectedCompendiumID = "mine"
     @State private var comparisonOwnerID: String?
     @State private var showingTransfer = false
+    @State private var pendingDeleteCompendium: SharedCompendium?
+    @State private var sharedCompendiumMessage: String?
     @State private var draggingItem: LadderDrinkDisplayItem?
     @State private var dragTranslation: CGSize = .zero
     @State private var isOverDeleteTarget = false
@@ -324,8 +327,36 @@ struct CollectionView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
                         openComparison(compendium)
                     }
+                },
+                onDeleted: { compendium in
+                    clearStateForDeletedSharedCompendium(compendium)
                 }
             )
+        }
+        .confirmationDialog(
+            "删除好友档案？",
+            isPresented: Binding(
+                get: { pendingDeleteCompendium != nil },
+                set: { if !$0 { pendingDeleteCompendium = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingDeleteCompendium {
+                Button("删除 \(pendingDeleteCompendium.ownerName) 的档案", role: .destructive) {
+                    deleteSharedCompendium(pendingDeleteCompendium)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会删除已经交换来的档案、相关贴纸和交换统计。此操作不能撤销。")
+        }
+        .alert("档案", isPresented: Binding(
+            get: { sharedCompendiumMessage != nil },
+            set: { if !$0 { sharedCompendiumMessage = nil } }
+        )) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(sharedCompendiumMessage ?? "")
         }
         .sheet(isPresented: $showingExportShare) {
             if let exportedURL = exportedFileURL {
@@ -339,7 +370,7 @@ struct CollectionView: View {
         }
         .fileImporter(
             isPresented: $showingImportPicker,
-            allowedContentTypes: [.zip],
+            allowedContentTypes: [.milkTCompendiumPackage, .data],
             allowsMultipleSelection: false
         ) { result in
             switch result {
@@ -780,9 +811,13 @@ struct CollectionView: View {
         defer { isImporting = false }
 
         do {
-            let count = try await DataMigrationManager.importBackup(from: url, modelContext: modelContext)
+            let result = try await DataMigrationManager.importBackup(
+                from: url,
+                existingDrinks: drinks,
+                modelContext: modelContext
+            )
             await MainActor.run {
-                importResult = "成功导入 \(count) 条饮品记录"
+                importResult = "已导入 \(result.insertedCount) 条，跳过 \(result.skippedCount) 条重复记录。"
             }
         } catch {
             await MainActor.run {
@@ -1193,6 +1228,32 @@ struct CollectionView: View {
         modelContext.delete(drink)
         try? modelContext.save()
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+    }
+
+    private func deleteSharedCompendium(_ compendium: SharedCompendium) {
+        clearStateForDeletedSharedCompendium(compendium)
+        Task {
+            do {
+                try await sharedStore.deleteCompendium(ownerID: compendium.ownerID)
+                tasteStatsStore.removePeer(ownerID: compendium.ownerID)
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } catch {
+                sharedCompendiumMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func clearStateForDeletedSharedCompendium(_ compendium: SharedCompendium) {
+        if selectedCompendiumID == compendium.id {
+            switchCompendium(to: "mine")
+        }
+        if comparisonOwnerID == compendium.ownerID {
+            comparisonOwnerID = nil
+        }
+        selectedItem = nil
+        draggingItem = nil
+        dragTranslation = .zero
+        isOverDeleteTarget = false
     }
 }
 

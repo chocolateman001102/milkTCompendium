@@ -248,6 +248,11 @@ final class SharedCompendiumStore: ObservableObject {
         compendiums = Self.loadCompendiumsSync()
     }
 
+    func deleteCompendium(ownerID: String) async throws {
+        try await Self.deleteCompendiumSync(ownerID: ownerID)
+        await reload()
+    }
+
     nonisolated private static func loadCompendiums() async -> [SharedCompendium] {
         await Task.detached(priority: .utility) {
             loadCompendiumsSync()
@@ -293,6 +298,17 @@ final class SharedCompendiumStore: ObservableObject {
             }
         }
         return kept
+    }
+
+    nonisolated private static func deleteCompendiumSync(ownerID: String) async throws {
+        let cleanedOwnerID = ownerID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanedOwnerID.isEmpty else { return }
+
+        try await Task.detached(priority: .utility) {
+            let directory = ownerDirectory(ownerID: cleanedOwnerID)
+            guard FileManager.default.fileExists(atPath: directory.path) else { return }
+            try FileManager.default.removeItem(at: directory)
+        }.value
     }
 
     func importArchive(at url: URL) async throws -> SharedCompendium {
