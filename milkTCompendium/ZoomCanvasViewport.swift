@@ -9,116 +9,177 @@ final class ZoomCanvasScrollView: UIScrollView {
     }
 }
 
+/// Owns the coordinate conversion between a zoomed canvas and its scroll view.
+///
+/// `UIScrollView.contentSize` is briefly stale while a zoomable subview is being
+/// resized or replaced.  That is particularly visible when SwiftUI reuses a
+/// representable for a different compendium: using the stale value to derive
+/// insets makes the next pinch start from the previous canvas's bounds.  All
+/// geometry in this type is therefore derived from the source canvas size and
+/// the active zoom scale instead of `contentSize`.
 final class ZoomCanvasViewportController {
     weak var scrollView: UIScrollView?
+
     private var canvasSize: CGSize = .zero
     private var focusPoint: CGPoint = .zero
-    private var centeringOffset: CGPoint = .zero
-    private var centeringGeneration = 0
     private var pendingResetZoomScale: CGFloat?
+    private var isReconcilingGeometry = false
 
     func attach(_ scrollView: UIScrollView) {
         self.scrollView = scrollView
     }
 
-    func update(canvasSize: CGSize, focusPoint: CGPoint, centeringOffset: CGPoint = .zero) {
+    func update(canvasSize: CGSize, focusPoint: CGPoint) {
         self.canvasSize = canvasSize
         self.focusPoint = focusPoint
-        self.centeringOffset = centeringOffset
     }
 
+    /// Applies a queued reset as soon as Auto Layout has supplied a real viewport.
+    /// There is deliberately no timed retry loop: a later compendium must never
+    /// be affected by a delayed reset created for an earlier one.
     func handleLayout() {
-        updateContentInsets()
-        guard pendingResetZoomScale != nil else { return }
-        applyPendingReset(markComplete: false)
+        guard hasUsableGeometry else { return }
+        if pendingResetZoomScale != nil {
+            applyPendingReset()
+        } else {
+            updateContentInsets()
+        }
     }
 
     func requestReset(zoomScale: CGFloat) {
         pendingResetZoomScale = zoomScale
-        centeringGeneration += 1
-        let generation = centeringGeneration
-        let delays: [TimeInterval] = [0, 0.05, 0.18, 0.36, 0.7]
-
-        for (index, delay) in delays.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, self.centeringGeneration == generation else { return }
-                self.applyPendingReset(markComplete: index == delays.count - 1)
-            }
-        }
+        applyPendingReset()
     }
 
     func cancelPendingReset() {
         pendingResetZoomScale = nil
-        centeringGeneration += 1
     }
 
+    /// Keeps an undersized canvas centered without changing the user's valid
+    /// pan position on axes that are larger than the viewport.
     func updateContentInsets() {
-        guard let scrollView, hasUsableGeometry(scrollView) else { return }
-        let horizontalInset = max(0, (scrollView.bounds.width - scrollView.contentSize.width) / 2)
-        let verticalInset = max(0, (scrollView.bounds.height - scrollView.contentSize.height) / 2)
-        let inset = UIEdgeInsets(
-            top: max(0, verticalInset - centeringOffset.y),
-            left: max(0, horizontalInset - centeringOffset.x),
-            bottom: verticalInset + max(0, centeringOffset.y),
-            right: horizontalInset + max(0, centeringOffset.x)
-        )
-        guard scrollView.contentInset != inset else { return }
-        scrollView.contentInset = inset
-        scrollView.scrollIndicatorInsets = inset
+        reconcileGeometry(clampLargeContent: false)
     }
 
+    /// Restores the valid pan range after a zoom or a canvas-size change.
     func clampContentOffset() {
-        guard let scrollView, hasUsableGeometry(scrollView) else { return }
-        updateContentInsets()
-        let clamped = clampedOffset(scrollView.contentOffset, in: scrollView)
-        guard clamped != scrollView.contentOffset else { return }
-        scrollView.setContentOffset(clamped, animated: false)
+        reconcileGeometry(clampLargeContent: true)
     }
 
-    private func applyPendingReset(markComplete: Bool) {
+    private func applyPendingReset() {
         guard let scrollView,
-              let resetZoomScale = pendingResetZoomScale,
-              hasUsableGeometry(scrollView),
+              let requestedScale = pendingResetZoomScale,
+              hasUsableGeometry,
               scrollView.window != nil,
               !scrollView.isDragging,
               !scrollView.isDecelerating else {
             return
         }
 
-        let targetScale = min(scrollView.maximumZoomScale, max(scrollView.minimumZoomScale, resetZoomScale))
-        let visibleSize = CGSize(
-            width: min(canvasSize.width, scrollView.bounds.width / targetScale),
-            height: min(canvasSize.height, scrollView.bounds.height / targetScale)
-        )
-        let visibleOrigin = CGPoint(
-            x: min(max(focusPoint.x - visibleSize.width / 2 + centeringOffset.x, 0), max(0, canvasSize.width - visibleSize.width)),
-            y: min(max(focusPoint.y - visibleSize.height / 2 + centeringOffset.y, 0), max(0, canvasSize.height - visibleSize.height))
-        )
-        let visibleRect = CGRect(origin: visibleOrigin, size: visibleSize)
-        scrollView.zoom(to: visibleRect, animated: false)
+        let scale = clampedZoomScale(requestedScale, in: scrollView)
+        pendingResetZoomScale = nil
 
-        updateContentInsets()
-        clampContentOffset()
-        if markComplete {
-            pendingResetZoomScale = nil
-        }
+        // `zoom(to:)` derives its scale from the scroll view's transient
+        // contentSize.  Set the scale directly, then set a content offset from
+        // stable source-space geometry instead.
+        scrollView.setZoomScale(scale, animated: false)
+        reconcileGeometry(clampLargeContent: false)
+
+        let inset = contentInset(for: scrollView, scale: scale)
+        let desiredOffset = CGPoint(
+            x: focusPoint.x * scale - scrollView.bounds.midX - inset.left,
+            y: focusPoint.y * scale - scrollView.bounds.midY - inset.top
+        )
+        setContentOffset(
+            clampedOffset(desiredOffset, in: scrollView, scale: scale, inset: inset),
+            on: scrollView
+        )
     }
 
-    private func hasUsableGeometry(_ scrollView: UIScrollView) -> Bool {
-        scrollView.bounds.width > 1
+    private func reconcileGeometry(clampLargeContent: Bool) {
+        guard let scrollView, hasUsableGeometry, !isReconcilingGeometry else { return }
+
+        isReconcilingGeometry = true
+        defer { isReconcilingGeometry = false }
+
+        let scale = clampedZoomScale(scrollView.zoomScale, in: scrollView)
+        let inset = contentInset(for: scrollView, scale: scale)
+        if !insetsAreEqual(scrollView.contentInset, inset) {
+            scrollView.contentInset = inset
+            scrollView.scrollIndicatorInsets = inset
+        }
+
+        let scaledSize = scaledCanvasSize(for: scale)
+        var targetOffset = scrollView.contentOffset
+        if scaledSize.width <= scrollView.bounds.width {
+            targetOffset.x = -inset.left
+        } else if clampLargeContent {
+            targetOffset.x = clampedOffset(targetOffset, in: scrollView, scale: scale, inset: inset).x
+        }
+
+        if scaledSize.height <= scrollView.bounds.height {
+            targetOffset.y = -inset.top
+        } else if clampLargeContent {
+            targetOffset.y = clampedOffset(targetOffset, in: scrollView, scale: scale, inset: inset).y
+        }
+        setContentOffset(targetOffset, on: scrollView)
+    }
+
+    private var hasUsableGeometry: Bool {
+        guard let scrollView else { return false }
+        return scrollView.bounds.width > 1
             && scrollView.bounds.height > 1
             && canvasSize.width > 1
             && canvasSize.height > 1
     }
 
-    private func clampedOffset(_ offset: CGPoint, in scrollView: UIScrollView) -> CGPoint {
-        let minX = -scrollView.contentInset.left
-        let minY = -scrollView.contentInset.top
-        let maxX = max(minX, scrollView.contentSize.width - scrollView.bounds.width + scrollView.contentInset.right)
-        let maxY = max(minY, scrollView.contentSize.height - scrollView.bounds.height + scrollView.contentInset.bottom)
+    private func clampedZoomScale(_ scale: CGFloat, in scrollView: UIScrollView) -> CGFloat {
+        min(scrollView.maximumZoomScale, max(scrollView.minimumZoomScale, scale))
+    }
+
+    private func scaledCanvasSize(for scale: CGFloat) -> CGSize {
+        CGSize(width: canvasSize.width * scale, height: canvasSize.height * scale)
+    }
+
+    private func contentInset(for scrollView: UIScrollView, scale: CGFloat) -> UIEdgeInsets {
+        let scaledSize = scaledCanvasSize(for: scale)
+        return UIEdgeInsets(
+            top: max(0, (scrollView.bounds.height - scaledSize.height) / 2),
+            left: max(0, (scrollView.bounds.width - scaledSize.width) / 2),
+            bottom: max(0, (scrollView.bounds.height - scaledSize.height) / 2),
+            right: max(0, (scrollView.bounds.width - scaledSize.width) / 2)
+        )
+    }
+
+    private func clampedOffset(
+        _ offset: CGPoint,
+        in scrollView: UIScrollView,
+        scale: CGFloat,
+        inset: UIEdgeInsets
+    ) -> CGPoint {
+        let scaledSize = scaledCanvasSize(for: scale)
+        let minX = -inset.left
+        let minY = -inset.top
+        let maxX = max(minX, scaledSize.width - scrollView.bounds.width + inset.right)
+        let maxY = max(minY, scaledSize.height - scrollView.bounds.height + inset.bottom)
         return CGPoint(
             x: min(max(offset.x, minX), maxX),
             y: min(max(offset.y, minY), maxY)
         )
+    }
+
+    private func setContentOffset(_ offset: CGPoint, on scrollView: UIScrollView) {
+        guard abs(scrollView.contentOffset.x - offset.x) > 0.01
+                || abs(scrollView.contentOffset.y - offset.y) > 0.01 else {
+            return
+        }
+        scrollView.setContentOffset(offset, animated: false)
+    }
+
+    private func insetsAreEqual(_ lhs: UIEdgeInsets, _ rhs: UIEdgeInsets) -> Bool {
+        abs(lhs.top - rhs.top) < 0.01
+            && abs(lhs.left - rhs.left) < 0.01
+            && abs(lhs.bottom - rhs.bottom) < 0.01
+            && abs(lhs.right - rhs.right) < 0.01
     }
 }

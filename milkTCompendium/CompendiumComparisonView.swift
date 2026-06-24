@@ -140,6 +140,10 @@ struct CompendiumComparisonView: View {
                     }
                 }
             )
+            // Switching the compared owner replaces the canvas, not merely its
+            // pixels. Give it a fresh native scroll view so no offset, inset,
+            // or gesture state leaks across compendiums.
+            .id(layout.contentSignature)
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("图鉴对比天梯")
         }
@@ -469,6 +473,8 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         context.coordinator.canvasView = canvasView
         context.coordinator.nodes = nodes
         context.coordinator.contentSize = contentSize
+        context.coordinator.contentSignature = contentSignature
+        context.coordinator.centerResetToken = centerResetToken
         context.coordinator.viewport.attach(scrollView)
         context.coordinator.viewport.update(
             canvasSize: contentSize,
@@ -477,7 +483,7 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
                 y: (metrics.plotTop + metrics.plotBottom) / 2
             )
         )
-        context.coordinator.viewport.requestReset(zoomScale: CompendiumComparisonView.initialZoomScale)
+        context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
         return scrollView
     }
 
@@ -513,8 +519,9 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             }
         }
 
-        if centerResetDidChange || sizeDidChange || contentDidChange {
-            context.coordinator.viewport.requestReset(zoomScale: CompendiumComparisonView.initialZoomScale)
+        let shouldResetViewport = centerResetDidChange || sizeDidChange || contentDidChange
+        if shouldResetViewport {
+            context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
         } else if !context.coordinator.isZooming,
                   abs(scrollView.zoomScale - zoomScale) > 0.001 {
             scrollView.setZoomScale(zoomScale, animated: false)
@@ -547,6 +554,16 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
 
         func handleScrollViewLayout() {
             viewport.handleLayout()
+        }
+
+        func resetViewport(to scale: CGFloat) {
+            isZooming = false
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                zoomScale.wrappedValue = scale
+            }
+            viewport.requestReset(zoomScale: scale)
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -582,6 +599,16 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             viewport.updateContentInsets()
             viewport.clampContentOffset()
             canvasView?.applyZoom(scale: settledScale, mode: .settled, animatesLabel: true)
+        }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate {
+                viewport.clampContentOffset()
+            }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            viewport.clampContentOffset()
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {

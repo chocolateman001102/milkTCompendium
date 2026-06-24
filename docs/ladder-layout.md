@@ -12,6 +12,7 @@
 
 - 首页天梯的初始视觉位置通过 `CollectionView.initialLadderVisualYOffset` 下移绘制坐标，而不是依赖 `UIScrollView` 的初始 `contentOffset`。这样打开首页时会露出更多天梯顶部区域。
 - `LadderMetrics` 接收 `verticalVisualOffset`，并同时下移 `plotTop` / `plotBottom`，保证评分轴和饮品节点整体同步移动。
+- 画布高度必须为 `verticalVisualOffset` 预留同等空间，且 `plotBottom` 必须落在画布内；否则绘制内容和可拖动边界会不一致。
 - `LadderLayoutProfile.stable.columnSpacing` 调整为 `82`，让多列饮品排布比原先更紧凑一些，同时保留碰撞检测的安全距离。
 
 ## 当前布局原则

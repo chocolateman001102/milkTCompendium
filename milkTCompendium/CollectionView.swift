@@ -527,6 +527,10 @@ struct CollectionView: View {
                     }
                 }
             )
+            // A compendium owns its viewport state. Reusing a UIScrollView
+            // across different canvases leaves the previous offset and inset
+            // alive long enough to corrupt the next pinch gesture.
+            .id(layout.contentSignature)
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("评分天梯图")
         }
@@ -918,16 +922,17 @@ struct CollectionView: View {
 
     private func ladderCanvasSize(for viewport: CGSize) -> CGSize {
         let drinkCount = CGFloat(max(filteredDisplayItems.count, 1))
+        let visualOffset = Self.initialLadderVisualYOffset
         let densityHeight = 920 + drinkCount * 13
         let iconProfile = LadderLayoutProfile.stable.scaled(by: Self.layoutCounterScale)
         let labelProfile = LadderLayoutProfile.stable.scaledSizes(by: Self.labelLayoutCounterScale)
         let iconCollisionHeight = iconProfile.compactNodeSize.height + iconProfile.compactCollisionPadding.height
         let labelCollisionHeight = labelProfile.labelBubbleSize.height + labelProfile.labelCollisionPadding.height
         let requiredPlotHeight = iconCollisionHeight * 5 / Self.preferredSameColumnRatingGap
-        let requiredHeight = ladderPlotTopClearance + requiredPlotHeight + ladderPlotBottomClearance
+        let requiredHeight = ladderPlotTopClearance + requiredPlotHeight + ladderPlotBottomClearance + visualOffset
         let baseHeight = max(
-            viewport.height * 2.28 + ladderCanvasVerticalSafePadding * 2,
-            densityHeight + ladderCanvasVerticalSafePadding * 2,
+            viewport.height * 2.28 + ladderCanvasVerticalSafePadding * 2 + visualOffset,
+            densityHeight + ladderCanvasVerticalSafePadding * 2 + visualOffset,
             requiredHeight
         )
         let estimatedPlotBottom = max(ladderPlotTopClearance + 720, baseHeight - ladderPlotBottomClearance)
@@ -1741,6 +1746,8 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         context.coordinator.scrollView = scrollView
         context.coordinator.contentSize = contentSize
+        context.coordinator.contentSignature = contentSignature
+        context.coordinator.centerResetToken = centerResetToken
         context.coordinator.viewport.attach(scrollView)
         context.coordinator.viewport.update(
             canvasSize: contentSize,
@@ -1749,6 +1756,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
                 y: (metrics.plotTop + metrics.plotBottom) / 2
             )
         )
+        context.coordinator.resetViewport(to: CollectionView.initialLadderScale)
         return scrollView
     }
 
@@ -1791,7 +1799,8 @@ private struct ZoomableLadderView: UIViewRepresentable {
             isOverDeleteTarget: isOverDeleteTarget
         )
 
-        if !centerResetDidChange,
+        let shouldResetViewport = contentDidChange || centerResetDidChange || sizeDidChange
+        if !shouldResetViewport,
            !context.coordinator.isZooming,
            abs(scrollView.zoomScale - zoomScale) > 0.001 {
             scrollView.setZoomScale(zoomScale, animated: false)
@@ -1804,8 +1813,12 @@ private struct ZoomableLadderView: UIViewRepresentable {
         if !context.coordinator.isZooming || contentDidChange || sizeDidChange {
             scrollView.layoutIfNeeded()
         }
-        if contentDidChange || centerResetDidChange || sizeDidChange {
-            context.coordinator.viewport.requestReset(zoomScale: CollectionView.initialLadderScale)
+        if shouldResetViewport {
+            context.coordinator.resetViewport(to: CollectionView.initialLadderScale)
+            context.coordinator.canvasView?.applyZoom(
+                scale: scrollView.zoomScale,
+                mode: context.coordinator.isZooming ? .preview : .settled
+            )
         }
     }
 
@@ -1849,6 +1862,12 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         func handleScrollViewLayout() {
             viewport.handleLayout()
+        }
+
+        func resetViewport(to scale: CGFloat) {
+            isZooming = false
+            reportZoomScale(scale)
+            viewport.requestReset(zoomScale: scale)
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
@@ -1997,9 +2016,20 @@ private struct ZoomableLadderView: UIViewRepresentable {
             isZooming = false
             lastZoomInteractionAt = CACurrentMediaTime()
             viewport.updateContentInsets()
+            viewport.clampContentOffset()
             canvasView?.applyZoom(scale: scale, mode: .settled, animatesLabel: true)
             reportZoomScale(scale)
             lastReportedZoomScale = scale
+        }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            if !decelerate {
+                viewport.clampContentOffset()
+            }
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+            viewport.clampContentOffset()
         }
 
         private func reportZoomScale(_ scale: CGFloat) {
@@ -2099,7 +2129,9 @@ private struct LadderMetrics {
     ) {
         self.size = size
         let basePlotTop = topClearance
-        let basePlotBottom = max(basePlotTop + 720, size.height - bottomClearance)
+        // Keep the visual shift inside the scrollable canvas. Previously the
+        // plot's lower edge could be drawn beyond the canvas's pan boundary.
+        let basePlotBottom = max(basePlotTop + 720, size.height - bottomClearance - verticalVisualOffset)
         plotTop = basePlotTop + verticalVisualOffset
         plotBottom = basePlotBottom + verticalVisualOffset
         centerX = size.width / 2
