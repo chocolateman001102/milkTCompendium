@@ -38,14 +38,6 @@ struct NearbyTransferView: View {
 }
 
 private struct NearbyTransferSessionView: View {
-    enum PeerFilter: String, CaseIterable, Identifiable {
-        case all = "全部"
-        case notImported = "还没交换"
-        case imported = "已经交换"
-
-        var id: String { rawValue }
-    }
-
     let drinks: [Drink]
     let sharedStore: SharedCompendiumStore
     @ObservedObject var tasteStatsStore: TasteExchangeStatsStore
@@ -63,7 +55,6 @@ private struct NearbyTransferSessionView: View {
     @State private var selectedPeer: NearbyPeer?
     @State private var pendingDeleteCompendium: SharedCompendium?
     @State private var searchText = ""
-    @State private var filter: PeerFilter = .all
     @State private var showingDisplayNameEditor = false
     @State private var showingBackupImportPicker = false
 
@@ -236,27 +227,15 @@ private struct NearbyTransferSessionView: View {
     private var myCard: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(alignment: .top, spacing: 14) {
-                HStack(alignment: .center, spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color.black.opacity(0.9))
-                        Image(systemName: "person.crop.circle.fill")
-                            .font(.system(size: 24, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    .frame(width: 54, height: 54)
-                    .shadow(color: .black.opacity(0.12), radius: 10, y: 5)
-
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(displayName)
-                            .font(.system(size: 28, weight: .black, design: .rounded))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                        Text("\(profileCupCount) 杯 · \(drinks.count) 项")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(displayName)
+                        .font(.system(size: 28, weight: .black, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    Text("\(profileCupCount) 杯 · \(drinks.count) 项")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
 
                 Spacer(minLength: 8)
@@ -490,32 +469,23 @@ private struct NearbyTransferSessionView: View {
     }
 
     private var controls: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
 
-                TextField("搜索档案", text: $searchText)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-            }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 11)
-            .background(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(.black.opacity(0.07), lineWidth: 1)
-            )
-
-            Picker("筛选", selection: $filter) {
-                ForEach(PeerFilter.allCases) { filter in
-                    Text(filter.rawValue).tag(filter)
-                }
-            }
-            .pickerStyle(.segmented)
+            TextField("搜索档案", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
         }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 11)
+        .background(.white)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(.black.opacity(0.07), lineWidth: 1)
+        )
     }
 
     private var partyWall: some View {
@@ -607,18 +577,9 @@ private struct NearbyTransferSessionView: View {
 
     private var filteredPeers: [NearbyPeer] {
         manager.peers.filter { peer in
-            let imported = importedCompendium(for: peer) != nil
-            let matchesFilter = switch filter {
-            case .all:
-                true
-            case .notImported:
-                !imported
-            case .imported:
-                imported
-            }
             let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
             let matchesSearch = query.isEmpty || peer.name.localizedCaseInsensitiveContains(query)
-            return matchesFilter && matchesSearch
+            return matchesSearch
         }
     }
 
@@ -704,45 +665,36 @@ private struct ExchangedArchiveRow: View {
     let onDelete: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.green.opacity(0.16))
-                Image(systemName: "checkmark.seal.fill")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(.green)
-            }
-            .frame(width: 42, height: 42)
-
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(compendium.ownerName)
                     .font(.subheadline.weight(.black))
-                    .lineLimit(1)
-                Text("\(cupCount) 杯 · \(compendium.drinks.count) 项 · 已经交换来的档案")
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("\(cupCount) 杯 · \(compendium.drinks.count) 项 · 已交换档案")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer(minLength: 8)
+            Spacer(minLength: 0)
 
-            Button(action: onCompare) {
-                Image(systemName: "rectangle.split.2x1")
-                    .font(.system(size: 14, weight: .bold))
-                    .frame(width: 32, height: 32)
-            }
-            .buttonStyle(.bordered)
-            .clipShape(Circle())
-            .accessibilityLabel("查看 \(compendium.ownerName) 的共饮")
+            Menu {
+                Button(action: onCompare) {
+                    Label("查看共饮", systemImage: "rectangle.split.2x1")
+                }
 
-            Button(role: .destructive, action: onDelete) {
-                Image(systemName: "trash")
-                    .font(.system(size: 14, weight: .bold))
-                    .frame(width: 32, height: 32)
+                Button(role: .destructive, action: onDelete) {
+                    Label("删除档案", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.bordered)
-            .clipShape(Circle())
-            .accessibilityLabel("删除 \(compendium.ownerName) 的档案")
+            .accessibilityLabel("\(compendium.ownerName) 的档案操作")
         }
         .padding(12)
         .background(.white)
@@ -847,20 +799,11 @@ private struct PeerCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top, spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(isImported ? Color.green.opacity(0.16) : Color.black.opacity(0.08))
-                    Image(systemName: isImported ? "checkmark.seal.fill" : "person.wave.2.fill")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(isImported ? .green : .primary)
-                }
-                .frame(width: 38, height: 38)
-
                 VStack(alignment: .leading, spacing: 3) {
                     Text(peer.name)
                         .font(.headline.weight(.black))
                         .lineLimit(1)
-                    Text(isImported ? "已经交换来的档案，可更新" : "可交换档案")
+                    Text(isImported ? "已交换档案 · 可更新" : "可交换档案")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(isImported ? .green : .secondary)
                 }

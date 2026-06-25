@@ -5,6 +5,8 @@ struct FloatingDrinkCardOverlay: View {
     let onClose: () -> Void
     let onEdit: () -> Void
 
+    @State private var showingStickerPreview = false
+
     private let goldenRatio: CGFloat = 1.618
 
     var body: some View {
@@ -21,6 +23,11 @@ struct FloatingDrinkCardOverlay: View {
                 floatingContent(width: cardWidth, height: cardHeight)
                     .position(x: proxy.size.width / 2, y: proxy.size.height * 0.46)
                     .onTapGesture {}
+            }
+        }
+        .sheet(isPresented: $showingStickerPreview) {
+            if let stickerImage = item.stickerImage {
+                StickerPreviewView(image: stickerImage)
             }
         }
     }
@@ -98,21 +105,36 @@ struct FloatingDrinkCardOverlay: View {
     }
 
     private func stickerPanel(width: CGFloat, height: CGFloat) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
+        Button {
+            guard item.stickerImage != nil else { return }
+            showingStickerPreview = true
+        } label: {
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
 
-            if let image = item.stickerImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(8)
-            } else {
-                Image(systemName: "cup.and.saucer.fill")
-                    .font(.system(size: 42))
-                    .foregroundStyle(.secondary)
+                if let image = item.stickerImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(8)
+
+                    Image(systemName: "plus.magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .padding(6)
+                        .background(.white.opacity(0.92))
+                        .clipShape(Circle())
+                        .shadow(color: .black.opacity(0.08), radius: 5, y: 2)
+                        .padding(7)
+                } else {
+                    Image(systemName: "cup.and.saucer.fill")
+                        .font(.system(size: 42))
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+        .buttonStyle(.plain)
         .frame(width: width, height: height)
     }
 

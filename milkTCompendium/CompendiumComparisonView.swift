@@ -326,7 +326,7 @@ struct CompendiumComparisonView: View {
                 start: local.position,
                 end: peer.position,
                 color: connectionUIColor(for: pair.id, fallbackKey: pair.productKey, delta: pair.ratingDelta),
-                lineWidth: pair.ratingDelta > 1.5 ? 2.25 : 1.75
+                lineWidth: pair.ratingDelta > 1.5 ? 3.375 : 2.625
             )
         }
     }
@@ -463,7 +463,14 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         canvasView.backgroundColor = .clear
         canvasView.layer.drawsAsynchronously = true
         canvasView.frame = CGRect(origin: .zero, size: contentSize)
-        canvasView.configure(metrics: metrics, nodes: nodes, connections: connections, contentSize: contentSize, contentSignature: contentSignature)
+        canvasView.configure(
+            metrics: metrics,
+            nodes: nodes,
+            connections: connections,
+            contentSize: contentSize,
+            contentSignature: contentSignature,
+            displayScale: zoomScale
+        )
         canvasView.applyZoom(scale: zoomScale, mode: .settled)
         canvasView.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
         scrollView.addSubview(canvasView)
@@ -512,14 +519,21 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             scrollView.contentSize = contentSize
             context.coordinator.canvasView?.frame = CGRect(origin: .zero, size: contentSize)
         }
+        let shouldResetViewport = centerResetDidChange || sizeDidChange || contentDidChange
         if contentDidChange || sizeDidChange {
-            context.coordinator.canvasView?.configure(metrics: metrics, nodes: nodes, connections: connections, contentSize: contentSize, contentSignature: contentSignature)
+            context.coordinator.canvasView?.configure(
+                metrics: metrics,
+                nodes: nodes,
+                connections: connections,
+                contentSize: contentSize,
+                contentSignature: contentSignature,
+                displayScale: shouldResetViewport ? CompendiumComparisonView.initialZoomScale : scrollView.zoomScale
+            )
             if !centerResetDidChange {
                 context.coordinator.viewport.clampContentOffset()
             }
         }
 
-        let shouldResetViewport = centerResetDidChange || sizeDidChange || contentDidChange
         if shouldResetViewport {
             context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
         } else if !context.coordinator.isZooming,
@@ -665,10 +679,12 @@ private final class ComparisonLadderCanvasUIView: UIView {
         nodes: [ComparisonLadderNodeEntry],
         connections: [ComparisonLadderConnectionEntry],
         contentSize: CGSize,
-        contentSignature: String
+        contentSignature: String,
+        displayScale: CGFloat
     ) {
         let shouldAnimate = self.contentSignature != contentSignature
         self.contentSignature = contentSignature
+        currentScale = displayScale
         comparisonWithoutLayerActions {
             bounds = CGRect(origin: .zero, size: contentSize)
             axisLayer.frame = bounds
@@ -710,7 +726,7 @@ private final class ComparisonLadderCanvasUIView: UIView {
                 let isSelected = pairID == id
                 let shouldDim = pairID != nil && !isSelected
                 layer.opacity = shouldDim ? 0.12 : (isSelected ? 0.95 : 0.46)
-                layer.lineWidth = isSelected ? 3.4 : (layer.value(forKey: "baseLineWidth") as? CGFloat ?? 1.8)
+                layer.lineWidth = isSelected ? 5.1 : (layer.value(forKey: "baseLineWidth") as? CGFloat ?? 2.7)
                 layer.zPosition = isSelected ? 100 : 0
             }
         }
@@ -814,12 +830,16 @@ private final class ComparisonLadderCanvasUIView: UIView {
             return
         }
 
+        let entranceBeginTime = CACurrentMediaTime() + 0.35
+        let nodeRevealScale = Self.nodeCounterScale(for: currentScale)
+
         for (index, connectionLayer) in connectionLayers.values.enumerated() {
             let draw = CABasicAnimation(keyPath: "strokeEnd")
             draw.fromValue = 0
             draw.toValue = 1
-            draw.duration = connectionCount > 80 ? 0.34 : 0.62
-            draw.beginTime = CACurrentMediaTime() + (connectionCount > 80 ? 0 : min(0.22, Double(index) * 0.012))
+            draw.duration = connectionCount > 80 ? 0.51 : 0.93
+            draw.beginTime = entranceBeginTime + (connectionCount > 80 ? 0 : min(0.22, Double(index) * 0.012))
+            draw.fillMode = .backwards
             draw.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             connectionLayer.add(draw, forKey: "strokeReveal")
         }
@@ -830,11 +850,12 @@ private final class ComparisonLadderCanvasUIView: UIView {
             fade.fromValue = 0
             fade.toValue = nodeLayer.opacity
             let scale = CABasicAnimation(keyPath: "transform.scale")
-            scale.fromValue = 0.9
-            scale.toValue = 1
+            scale.fromValue = nodeRevealScale * 0.9
+            scale.toValue = nodeRevealScale
             group.animations = [fade, scale]
             group.duration = 0.26
-            group.beginTime = CACurrentMediaTime() + min(0.18, Double(index) * 0.006)
+            group.beginTime = entranceBeginTime + min(0.18, Double(index) * 0.006)
+            group.fillMode = .backwards
             group.timingFunction = CAMediaTimingFunction(name: .easeOut)
             nodeLayer.add(group, forKey: "nodeReveal")
         }

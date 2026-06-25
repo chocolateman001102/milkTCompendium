@@ -537,7 +537,7 @@ struct DrinkFormView: View {
     }
 }
 
-private struct StickerPreviewView: View {
+struct StickerPreviewView: View {
     @Environment(\.dismiss) private var dismiss
     let image: UIImage
 
@@ -573,7 +573,7 @@ private extension UIImage {
     }
 }
 
-private struct ZoomableImageView: UIViewRepresentable {
+struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
 
     func makeCoordinator() -> Coordinator {
