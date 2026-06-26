@@ -229,11 +229,11 @@ private struct NearbyTransferSessionView: View {
             HStack(alignment: .top, spacing: 14) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(displayName)
-                        .font(.system(size: 28, weight: .black, design: .rounded))
+                        .font(ArchiveReferenceTypography.title(29))
                         .lineLimit(1)
                         .minimumScaleFactor(0.72)
                     Text("\(profileCupCount) 杯 · \(drinks.count) 项")
-                        .font(.caption.weight(.semibold))
+                        .font(ArchiveReferenceTypography.terminal(12, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
@@ -253,7 +253,7 @@ private struct NearbyTransferSessionView: View {
 
             VStack(alignment: .leading, spacing: 9) {
                 Text("前三品牌")
-                    .font(.caption.weight(.black))
+                    .font(ArchiveReferenceTypography.terminal(11, weight: .black))
                     .foregroundStyle(.secondary)
 
                 if favoriteBrands.isEmpty {
@@ -287,10 +287,10 @@ private struct NearbyTransferSessionView: View {
     private var scoreBadge: some View {
         VStack(spacing: 3) {
             Text(String(format: "%.2f", tasteScore.score))
-                .font(.system(size: 38, weight: .black, design: .rounded).monospacedDigit())
+                .font(ArchiveReferenceTypography.display(38))
                 .foregroundStyle(.primary)
             Text(tasteScore.levelName)
-                .font(.caption.weight(.bold))
+                .font(ArchiveReferenceTypography.terminal(11, weight: .bold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         }
@@ -308,9 +308,9 @@ private struct NearbyTransferSessionView: View {
     private func summaryPill(value: String, label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.headline.weight(.black).monospacedDigit())
+                .font(ArchiveReferenceTypography.terminal(17, weight: .black))
             Text(label)
-                .font(.caption2.weight(.medium))
+                .font(ArchiveReferenceTypography.terminal(9.5, weight: .medium))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -337,7 +337,7 @@ private struct NearbyTransferSessionView: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("和朋友一起")
-                    .font(.caption.weight(.black))
+                    .font(ArchiveReferenceTypography.terminal(11, weight: .black))
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
@@ -360,9 +360,9 @@ private struct NearbyTransferSessionView: View {
     private func friendTotalMetric(value: Int, label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("\(value)")
-                .font(.headline.weight(.black).monospacedDigit())
+                .font(ArchiveReferenceTypography.terminal(17, weight: .black))
             Text(label)
-                .font(.caption2.weight(.semibold))
+                .font(ArchiveReferenceTypography.terminal(9.5, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -391,9 +391,9 @@ private struct NearbyTransferSessionView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("交换雷达")
-                    .font(.subheadline.weight(.black))
+                    .font(ArchiveReferenceTypography.terminal(14, weight: .black))
                 Text(manager.statusMessage)
-                    .font(.caption)
+                    .font(ArchiveReferenceTypography.terminal(11))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
@@ -405,7 +405,7 @@ private struct NearbyTransferSessionView: View {
                     .tint(isActive ? .orange : .secondary)
             } else {
                 Text("\(manager.peers.count)")
-                    .font(.headline.weight(.black).monospacedDigit())
+                    .font(ArchiveReferenceTypography.terminal(17, weight: .black))
                     .foregroundStyle(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -427,19 +427,19 @@ private struct NearbyTransferSessionView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("已经交换来的档案")
-                    .font(.headline.weight(.black))
+                    .font(ArchiveReferenceTypography.terminal(15, weight: .black))
                 Spacer()
                 Text("\(sharedStore.compendiums.count) 个")
-                    .font(.caption.weight(.bold).monospacedDigit())
+                    .font(ArchiveReferenceTypography.terminal(11, weight: .bold))
                     .foregroundStyle(.secondary)
             }
 
             if sharedStore.compendiums.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("还没有交换来的档案")
-                        .font(.subheadline.weight(.semibold))
+                        .font(ArchiveReferenceTypography.terminal(13, weight: .semibold))
                     Text("和朋友交换后，档案会出现在这里，也可以从这里删除。")
-                        .font(.caption)
+                        .font(ArchiveReferenceTypography.terminal(11))
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -475,6 +475,7 @@ private struct NearbyTransferSessionView: View {
                 .foregroundStyle(.secondary)
 
             TextField("搜索档案", text: $searchText)
+                .font(ArchiveReferenceTypography.terminal(13))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
         }
@@ -492,10 +493,10 @@ private struct NearbyTransferSessionView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("附近档案")
-                    .font(.headline.weight(.black))
+                    .font(ArchiveReferenceTypography.terminal(15, weight: .black))
                 Spacer()
                 Text("\(filteredPeers.count) 个")
-                    .font(.caption.weight(.bold).monospacedDigit())
+                    .font(ArchiveReferenceTypography.terminal(11, weight: .bold))
                     .foregroundStyle(.secondary)
             }
 
@@ -659,6 +660,20 @@ private struct FavoriteBrandSummary: Identifiable {
     }
 }
 
+private enum ArchiveReferenceTypography {
+    static func title(_ size: CGFloat) -> Font {
+        .system(size: size, weight: .black, design: .serif)
+    }
+
+    static func display(_ size: CGFloat) -> Font {
+        .system(size: size, weight: .black, design: .serif).monospacedDigit()
+    }
+
+    static func terminal(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight, design: .monospaced).monospacedDigit()
+    }
+}
+
 private struct ExchangedArchiveRow: View {
     let compendium: SharedCompendium
     let onCompare: () -> Void
@@ -668,12 +683,12 @@ private struct ExchangedArchiveRow: View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
                 Text(compendium.ownerName)
-                    .font(.subheadline.weight(.black))
+                    .font(ArchiveReferenceTypography.title(16))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
 
                 Text("\(cupCount) 杯 · \(compendium.drinks.count) 项 · 已交换档案")
-                    .font(.caption)
+                    .font(ArchiveReferenceTypography.terminal(11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -717,7 +732,7 @@ private struct FavoriteBrandRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Text("\(rank)")
-                .font(.caption.weight(.black))
+                .font(ArchiveReferenceTypography.terminal(12, weight: .black))
                 .foregroundStyle(.white)
                 .frame(width: 24, height: 24)
                 .background(.black)
@@ -725,18 +740,18 @@ private struct FavoriteBrandRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(summary.brand)
-                    .font(.subheadline.weight(.semibold))
+                    .font(ArchiveReferenceTypography.terminal(13, weight: .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text("\(summary.drinkCount) 杯")
-                    .font(.caption2)
+                    .font(ArchiveReferenceTypography.terminal(10))
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
             Text(String(format: "%.2f", summary.averageRating))
-                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .font(ArchiveReferenceTypography.terminal(13, weight: .semibold))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
@@ -759,6 +774,7 @@ private struct DisplayNameEditor: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 14) {
                 TextField("档案名", text: $draftDisplayName)
+                    .font(ArchiveReferenceTypography.terminal(14))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .padding(.horizontal, 12)
@@ -767,7 +783,7 @@ private struct DisplayNameEditor: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                 Text("附近的人会用这个名字识别你的档案。")
-                    .font(.footnote)
+                    .font(ArchiveReferenceTypography.terminal(11))
                     .foregroundStyle(.secondary)
 
                 Spacer()
@@ -801,10 +817,10 @@ private struct PeerCard: View {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(peer.name)
-                        .font(.headline.weight(.black))
+                        .font(ArchiveReferenceTypography.title(18))
                         .lineLimit(1)
                     Text(isImported ? "已交换档案 · 可更新" : "可交换档案")
-                        .font(.caption.weight(.semibold))
+                        .font(ArchiveReferenceTypography.terminal(11, weight: .semibold))
                         .foregroundStyle(isImported ? .green : .secondary)
                 }
 
@@ -830,9 +846,9 @@ private struct PeerCard: View {
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(.subheadline.weight(.black).monospacedDigit())
+                .font(ArchiveReferenceTypography.terminal(14, weight: .black))
             Text(label)
-                .font(.caption2)
+                .font(ArchiveReferenceTypography.terminal(10))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -864,9 +880,9 @@ private struct PeerExchangePanel: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(peer.name)
-                    .font(.title2.weight(.black))
+                    .font(ArchiveReferenceTypography.title(25))
                 Text("\(peer.drinkCount) 总杯 · 均分 \(String(format: "%.2f", peer.averageRating)) · \(isImported ? "已经交换来的档案" : "还没交换过档案")")
-                    .font(.subheadline)
+                    .font(ArchiveReferenceTypography.terminal(12))
                     .foregroundStyle(.secondary)
             }
 

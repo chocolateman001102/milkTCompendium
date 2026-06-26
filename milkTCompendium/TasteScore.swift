@@ -116,15 +116,15 @@ struct TasteScoreResult {
     var levelName: String {
         switch score {
         case ..<1:
-            return "不在茶区"
+            return "t5"
         case ..<2:
-            return "味觉待机"
+            return "t4"
         case ..<3:
-            return "微糖校准"
+            return "t3"
         case ..<4:
-            return "暗号已通"
+            return "t2"
         default:
-            return "茶眼"
+            return "t1"
         }
     }
 }

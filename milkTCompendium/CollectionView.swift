@@ -45,6 +45,7 @@ struct CollectionView: View {
     @State private var showingTransfer = false
     @State private var pendingBackupExportAfterTransferDismiss = false
     @State private var pendingDeleteCompendium: SharedCompendium?
+    @State private var pendingDeleteDrink: Drink?
     @State private var sharedCompendiumMessage: String?
     @State private var draggingItem: LadderDrinkDisplayItem?
     @State private var dragTranslation: CGSize = .zero
@@ -74,7 +75,7 @@ struct CollectionView: View {
     fileprivate static let initialLadderScale: CGFloat = defaultLadderScale
     fileprivate static let labelFadeStartScale: CGFloat = 0.9
     fileprivate static let labelRevealScale: CGFloat = 1.1
-    private let ladderTopControlClearance: CGFloat = 190
+    private let ladderTopControlClearance: CGFloat = 105
     private let ladderCanvasVerticalSafePadding: CGFloat = 64
     fileprivate static let initialLadderVisualYOffset: CGFloat = 160
     private static let preferredSameColumnRatingGap: Double = 0.20
@@ -269,7 +270,7 @@ struct CollectionView: View {
                 },
                 onClear: clearFilters
             )
-            .padding(.top, 12)
+            .padding(.top, 6)
             .padding(.horizontal, 12)
         }
         .background(Color(.systemGroupedBackground))
@@ -387,6 +388,24 @@ struct CollectionView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("这会删除已经交换来的档案、相关贴纸和交换统计。此操作不能撤销。")
+        }
+        .confirmationDialog(
+            "删除这杯饮品？",
+            isPresented: Binding(
+                get: { pendingDeleteDrink != nil },
+                set: { if !$0 { pendingDeleteDrink = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingDeleteDrink {
+                Button("删除 \(deleteConfirmationTitle(for: pendingDeleteDrink))", role: .destructive) {
+                    delete(pendingDeleteDrink)
+                    self.pendingDeleteDrink = nil
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会删除饮品记录和相关图片。此操作不能撤销。")
         }
         .alert("档案", isPresented: Binding(
             get: { sharedCompendiumMessage != nil },
@@ -517,7 +536,7 @@ struct CollectionView: View {
                 },
                 onDragEnded: { item, shouldDelete in
                     if shouldDelete, let drink = item?.localDrink {
-                        delete(drink)
+                        pendingDeleteDrink = drink
                     }
 
                     withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
@@ -530,7 +549,7 @@ struct CollectionView: View {
             // A compendium owns its viewport state. Reusing a UIScrollView
             // across different canvases leaves the previous offset and inset
             // alive long enough to corrupt the next pinch gesture.
-            .id(layout.contentSignature)
+            .id(selectedCompendiumID)
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("评分天梯图")
         }
@@ -717,13 +736,6 @@ struct CollectionView: View {
                 bestScore = max(bestScore, 96 + priority)
             } else if field.contains(query) {
                 bestScore = max(bestScore, 78 + priority)
-            } else if orderedCharacterMatch(query: query, in: field) {
-                bestScore = max(bestScore, 46 + priority)
-            } else {
-                let overlap = characterOverlap(query: query, field: field)
-                if overlap > 0 {
-                    bestScore = max(bestScore, min(36, overlap * 8) + priority)
-                }
             }
         }
         return bestScore
@@ -734,23 +746,6 @@ struct CollectionView: View {
             .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
             .lowercased()
             .filter { !$0.isWhitespace && !$0.isNewline && !$0.isPunctuation }
-    }
-
-    private static func orderedCharacterMatch(query: String, in field: String) -> Bool {
-        guard !query.isEmpty else { return true }
-        var searchStart = field.startIndex
-        for character in query {
-            guard let foundIndex = field[searchStart...].firstIndex(of: character) else {
-                return false
-            }
-            searchStart = field.index(after: foundIndex)
-        }
-        return true
-    }
-
-    private static func characterOverlap(query: String, field: String) -> Int {
-        let fieldCharacters = Set(field)
-        return Set(query).filter { fieldCharacters.contains($0) }.count
     }
 
     private func switchCompendium(to id: String) {
@@ -1324,6 +1319,18 @@ struct CollectionView: View {
         UINotificationFeedbackGenerator().notificationOccurred(.success)
     }
 
+    private func deleteConfirmationTitle(for drink: Drink) -> String {
+        let brand = drink.brand.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = drink.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if brand.isEmpty {
+            return name.isEmpty ? "未命名饮品" : name
+        }
+        if name.isEmpty {
+            return brand
+        }
+        return "\(brand) \(name)"
+    }
+
     private func deleteSharedCompendium(_ compendium: SharedCompendium) {
         clearStateForDeletedSharedCompendium(compendium)
         Task {
@@ -1379,87 +1386,72 @@ private struct LadderTopDock: View {
     let onClear: () -> Void
 
     var body: some View {
-        VStack(spacing: 6) {
-            VStack(spacing: 7) {
-                HStack(spacing: 7) {
-                    compendiumMenu
-                    Spacer(minLength: 8)
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                compendiumMenu
 
-                    if !sharedCompendiums.isEmpty {
-                        compareMenu
-                    }
+                searchField
 
-                    Button {
-                        onOpenProfile()
-                    } label: {
-                        dockIcon(systemName: "ellipsis", isActive: true)
+                if hasItems {
+                    Text("\(filteredCount)/\(totalCount)")
+                        .font(.caption2.weight(.bold).monospacedDigit())
+                        .foregroundStyle(hasActiveFilter ? .primary : .secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.black.opacity(hasActiveFilter ? 0.09 : 0.045))
+                        .clipShape(Capsule())
+                }
+
+                if hasActiveFilter {
+                    Button(action: onClear) {
+                        dockIcon(systemName: "xmark", isActive: true)
                     }
                     .buttonStyle(LeverControlButtonStyle())
+                    .transition(.scale.combined(with: .opacity))
                 }
-                .frame(height: 34)
 
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.secondary)
-
-                    TextField("搜索品牌、品名、口味", text: $searchText)
-                        .font(.caption.weight(.medium))
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .submitLabel(.search)
-                        .frame(maxWidth: .infinity)
-
-                    if hasItems {
-                        Text("\(filteredCount)/\(totalCount)")
-                            .font(.caption2.weight(.bold).monospacedDigit())
-                            .foregroundStyle(hasActiveFilter ? .primary : .secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 3)
-                            .background(Color.black.opacity(hasActiveFilter ? 0.09 : 0.045))
-                            .clipShape(Capsule())
-                    }
-
-                    Button {
-                        withAnimation(.spring(response: 0.24, dampingFraction: 0.82)) {
-                            isFilterPanelExpanded.toggle()
-                        }
-                    } label: {
-                        dockIcon(
-                            systemName: "slider.horizontal.3",
-                            isActive: isFilterPanelExpanded || hasActiveFilter
-                        )
-                    }
-                    .disabled(!hasItems)
-                    .buttonStyle(LeverControlButtonStyle())
-
-                    if hasActiveFilter {
-                        Button(action: onClear) {
-                            dockIcon(systemName: "xmark", isActive: true)
-                        }
-                        .buttonStyle(LeverControlButtonStyle())
-                        .transition(.scale.combined(with: .opacity))
-                    }
+                if !sharedCompendiums.isEmpty {
+                    compareMenu
                 }
-                .frame(height: 34)
+
+                Button {
+                    onOpenProfile()
+                } label: {
+                    dockIcon(systemName: "ellipsis", isActive: true)
+                }
+                .buttonStyle(LeverControlButtonStyle())
             }
-            .padding(6)
+            .frame(height: 32)
+            .padding(5)
             .background(.white.opacity(0.96))
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 19, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                RoundedRectangle(cornerRadius: 19, style: .continuous)
                     .stroke(.black.opacity(0.1), lineWidth: 1)
             )
-            .shadow(color: .black.opacity(0.08), radius: 10, y: 5)
+            .shadow(color: .black.opacity(0.08), radius: 8, y: 4)
 
-            if isFilterPanelExpanded && hasItems {
-                filterPanel
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
         }
         .frame(maxWidth: 560)
-        .animation(.spring(response: 0.24, dampingFraction: 0.84), value: isFilterPanelExpanded)
         .animation(.spring(response: 0.24, dampingFraction: 0.84), value: hasActiveFilter)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("搜索", text: $searchText)
+                .font(.caption.weight(.medium))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, minHeight: 28)
+        .background(Color.black.opacity(0.045))
+        .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
     }
 
     private var compendiumMenu: some View {
@@ -1507,9 +1499,9 @@ private struct LadderTopDock: View {
             }
             .padding(.leading, 10)
             .padding(.trailing, 7)
-            .padding(.vertical, 6)
+            .padding(.vertical, 4)
             .background(Color.black.opacity(0.045))
-            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -1557,8 +1549,8 @@ private struct LadderTopDock: View {
                 .font(.system(size: 11, weight: .black, design: .rounded))
         }
         .foregroundStyle(.white)
-        .padding(.horizontal, 10)
-        .frame(height: 32)
+        .padding(.horizontal, 9)
+        .frame(height: 28)
         .background(Color.black.opacity(0.9))
         .clipShape(Capsule())
     }
@@ -1601,9 +1593,9 @@ private struct LadderTopDock: View {
 
     private func dockIcon(systemName: String, isActive: Bool) -> some View {
         Image(systemName: systemName)
-            .font(.system(size: 13, weight: .bold))
+            .font(.system(size: 12, weight: .bold))
             .foregroundStyle(isActive ? .white : .primary)
-            .frame(width: 32, height: 32)
+            .frame(width: 28, height: 28)
             .background(isActive ? Color.black.opacity(0.9) : Color.black.opacity(0.055))
             .clipShape(Circle())
     }
@@ -1789,7 +1781,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         if contentDidChange || sizeDidChange {
             context.coordinator.canvasView?.configure(metrics: metrics, entries: entries, contentSize: contentSize)
-            if !contentDidChange && !centerResetDidChange {
+            if !centerResetDidChange {
                 context.coordinator.viewport.clampContentOffset()
             }
         }
@@ -1799,7 +1791,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
             isOverDeleteTarget: isOverDeleteTarget
         )
 
-        let shouldResetViewport = contentDidChange || centerResetDidChange || sizeDidChange
+        let shouldResetViewport = centerResetDidChange
         if !shouldResetViewport,
            !context.coordinator.isZooming,
            abs(scrollView.zoomScale - zoomScale) > 0.001 {
@@ -1925,7 +1917,18 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         private func isPointOverDeleteTarget(_ point: CGPoint, in scrollView: UIScrollView) -> Bool {
-            point.y >= scrollView.bounds.height - 150
+            let visiblePoint = CGPoint(
+                x: point.x - scrollView.bounds.minX,
+                y: point.y - scrollView.bounds.minY
+            )
+            let targetSize = CGSize(width: min(210, scrollView.bounds.width * 0.58), height: 76)
+            let targetFrame = CGRect(
+                x: (scrollView.bounds.width - targetSize.width) / 2,
+                y: scrollView.bounds.height - targetSize.height - 16,
+                width: targetSize.width,
+                height: targetSize.height
+            )
+            return targetFrame.contains(visiblePoint)
         }
 
         private func entry(at scrollViewPoint: CGPoint) -> LadderDrinkEntry? {
@@ -2558,7 +2561,7 @@ private struct DeleteDropZone: View {
                 .font(.system(size: 18, weight: .semibold))
                 .symbolEffect(.bounce, value: isActive)
 
-            Text(isActive ? "松手删除" : "删除")
+            Text(isActive ? "松手确认" : "删除")
                 .font(.headline)
                 .contentTransition(.opacity)
         }
