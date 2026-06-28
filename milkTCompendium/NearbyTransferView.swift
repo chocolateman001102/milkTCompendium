@@ -400,9 +400,20 @@ private struct NearbyTransferSessionView: View {
 
             Spacer()
 
-            if isActive || manager.peers.isEmpty {
+            if isActive {
+                Button {
+                    manager.cancelCurrentExchange()
+                } label: {
+                    Label("取消交换", systemImage: "xmark.circle.fill")
+                        .labelStyle(.iconOnly)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .tint(.orange)
+                .accessibilityLabel("取消交换")
+            } else if manager.peers.isEmpty {
                 ProgressView()
-                    .tint(isActive ? .orange : .secondary)
+                    .tint(.secondary)
             } else {
                 Text("\(manager.peers.count)")
                     .font(ArchiveReferenceTypography.terminal(17, weight: .black))
@@ -602,6 +613,9 @@ private struct NearbyTransferSessionView: View {
 
     private func importPackage(at url: URL) {
         Task {
+            defer {
+                try? FileManager.default.removeItem(at: url)
+            }
             do {
                 let existingOwnerIDs = Set(sharedStore.compendiums.map(\.ownerID))
                 let compendium = try await sharedStore.importArchive(at: url)

@@ -549,7 +549,7 @@ struct CollectionView: View {
             // A compendium owns its viewport state. Reusing a UIScrollView
             // across different canvases leaves the previous offset and inset
             // alive long enough to corrupt the next pinch gesture.
-            .id(selectedCompendiumID)
+            .id(layout.contentSignature)
             .background(Color(.systemGroupedBackground))
             .accessibilityLabel("评分天梯图")
         }
@@ -1756,6 +1756,12 @@ private struct ZoomableLadderView: UIViewRepresentable {
         let contentDidChange = context.coordinator.contentSignature != contentSignature
         let sizeDidChange = context.coordinator.contentSize != contentSize
         let centerResetDidChange = context.coordinator.centerResetToken != centerResetToken
+        let shouldResetViewport = centerResetDidChange || contentDidChange || sizeDidChange
+        if shouldResetViewport {
+            context.coordinator.cancelDrag()
+        } else {
+            context.coordinator.ensureScrollEnabledIfIdle()
+        }
         if contentDidChange {
             context.coordinator.contentSignature = contentSignature
         }
@@ -1781,9 +1787,6 @@ private struct ZoomableLadderView: UIViewRepresentable {
 
         if contentDidChange || sizeDidChange {
             context.coordinator.canvasView?.configure(metrics: metrics, entries: entries, contentSize: contentSize)
-            if !centerResetDidChange {
-                context.coordinator.viewport.clampContentOffset()
-            }
         }
         context.coordinator.canvasView?.updateDragState(
             draggedItemID: draggedItemID,
@@ -1791,7 +1794,6 @@ private struct ZoomableLadderView: UIViewRepresentable {
             isOverDeleteTarget: isOverDeleteTarget
         )
 
-        let shouldResetViewport = centerResetDidChange
         if !shouldResetViewport,
            !context.coordinator.isZooming,
            abs(scrollView.zoomScale - zoomScale) > 0.001 {
@@ -1857,6 +1859,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func resetViewport(to scale: CGFloat) {
+            cancelDrag()
             isZooming = false
             reportZoomScale(scale)
             viewport.requestReset(zoomScale: scale)
@@ -1873,11 +1876,12 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
-            guard allowsDragging, canStartDrinkGesture, let scrollView else { return }
+            guard let scrollView else { return }
             let point = recognizer.location(in: scrollView)
 
             switch recognizer.state {
             case .began:
+                guard allowsDragging, canStartDrinkGesture else { return }
                 guard let entry = entry(at: point), entry.item.localDrink != nil else { return }
                 longPressedItem = entry.item
                 longPressStartContentPoint = contentPoint(for: point)
@@ -1889,17 +1893,34 @@ private struct ZoomableLadderView: UIViewRepresentable {
                 onDragChanged(item, contentTranslation(to: point), isPointOverDeleteTarget(point, in: scrollView))
 
             case .ended:
-                onDragEnded(longPressedItem, isPointOverDeleteTarget(point, in: scrollView))
-                longPressedItem = nil
-                scrollView.isScrollEnabled = true
+                finishDrag(shouldDelete: isPointOverDeleteTarget(point, in: scrollView))
 
             case .cancelled, .failed:
-                onDragEnded(longPressedItem, false)
-                longPressedItem = nil
-                scrollView.isScrollEnabled = true
+                cancelDrag()
 
             default:
                 break
+            }
+        }
+
+        func finishDrag(shouldDelete: Bool) {
+            let item = longPressedItem
+            longPressedItem = nil
+            scrollView?.isScrollEnabled = true
+            onDragEnded(item, shouldDelete)
+        }
+
+        func cancelDrag() {
+            guard longPressedItem != nil || scrollView?.isScrollEnabled == false else {
+                scrollView?.isScrollEnabled = true
+                return
+            }
+            finishDrag(shouldDelete: false)
+        }
+
+        func ensureScrollEnabledIfIdle() {
+            if longPressedItem == nil {
+                scrollView?.isScrollEnabled = true
             }
         }
 
@@ -1997,6 +2018,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+            cancelDrag()
             isZooming = true
             viewport.cancelPendingReset()
             let now = CACurrentMediaTime()
@@ -2006,6 +2028,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            cancelDrag()
             viewport.cancelPendingReset()
         }
 

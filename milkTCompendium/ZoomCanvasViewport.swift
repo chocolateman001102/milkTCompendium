@@ -22,8 +22,12 @@ final class ZoomCanvasViewportController {
 
     private var canvasSize: CGSize = .zero
     private var focusPoint: CGPoint = .zero
-    private var pendingResetZoomScale: CGFloat?
+    private var pendingReset: PendingReset?
     private var isReconcilingGeometry = false
+
+    private struct PendingReset {
+        let zoomScale: CGFloat
+    }
 
     func attach(_ scrollView: UIScrollView) {
         self.scrollView = scrollView
@@ -32,14 +36,16 @@ final class ZoomCanvasViewportController {
     func update(canvasSize: CGSize, focusPoint: CGPoint) {
         self.canvasSize = canvasSize
         self.focusPoint = focusPoint
+        if pendingReset != nil {
+            applyPendingReset()
+        }
     }
 
     /// Applies a queued reset as soon as Auto Layout has supplied a real viewport.
     /// There is deliberately no timed retry loop: a later compendium must never
     /// be affected by a delayed reset created for an earlier one.
     func handleLayout() {
-        guard hasUsableGeometry else { return }
-        if pendingResetZoomScale != nil {
+        if pendingReset != nil {
             applyPendingReset()
         } else {
             updateContentInsets()
@@ -47,12 +53,12 @@ final class ZoomCanvasViewportController {
     }
 
     func requestReset(zoomScale: CGFloat) {
-        pendingResetZoomScale = zoomScale
+        pendingReset = PendingReset(zoomScale: zoomScale)
         applyPendingReset()
     }
 
     func cancelPendingReset() {
-        pendingResetZoomScale = nil
+        pendingReset = nil
     }
 
     /// Keeps an undersized canvas centered without changing the user's valid
@@ -68,16 +74,13 @@ final class ZoomCanvasViewportController {
 
     private func applyPendingReset() {
         guard let scrollView,
-              let requestedScale = pendingResetZoomScale,
-              hasUsableGeometry,
-              scrollView.window != nil,
-              !scrollView.isDragging,
-              !scrollView.isDecelerating else {
+              let reset = pendingReset,
+              canApplyReset(in: scrollView) else {
             return
         }
 
-        let scale = clampedZoomScale(requestedScale, in: scrollView)
-        pendingResetZoomScale = nil
+        let scale = clampedZoomScale(reset.zoomScale, in: scrollView)
+        pendingReset = nil
 
         // `zoom(to:)` derives its scale from the scroll view's transient
         // contentSize.  Set the scale directly, then set a content offset from
@@ -131,6 +134,13 @@ final class ZoomCanvasViewportController {
             && scrollView.bounds.height > 1
             && canvasSize.width > 1
             && canvasSize.height > 1
+    }
+
+    private func canApplyReset(in scrollView: UIScrollView) -> Bool {
+        hasUsableGeometry
+            && scrollView.window != nil
+            && !scrollView.isDragging
+            && !scrollView.isDecelerating
     }
 
     private func clampedZoomScale(_ scale: CGFloat, in scrollView: UIScrollView) -> CGFloat {

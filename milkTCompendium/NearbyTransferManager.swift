@@ -72,6 +72,7 @@ private struct NearbyControlMessage: Codable {
     enum Action: String, Codable {
         case requestCompendium
         case exchangeCompendium
+        case cancelExchange
     }
 
     let action: Action
@@ -145,7 +146,11 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     private var pendingExchangePeerID: MCPeerID?
     private var activeSendPeerID: MCPeerID?
     private var activeSendTask: Task<Void, Never>?
+    private var activeSendOperationID: UUID?
     private var sendTimeoutID: UUID?
+    private var exchangeSentPeerIDs: Set<MCPeerID> = []
+    private var exchangeReceivedPeerIDs: Set<MCPeerID> = []
+    private var cancelledExchangePeerIDs: Set<MCPeerID> = []
 
     init(summary: NearbyLocalSummary) {
         self.summary = summary
@@ -174,9 +179,11 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        cancelCurrentExchange(notifyPeer: true, statusMessage: nil)
         activeSendTask?.cancel()
         activeSendTask = nil
         activeSendPeerID = nil
+        activeSendOperationID = nil
         sendTimeoutID = nil
         browser.stopBrowsingForPeers()
         advertiser.stopAdvertisingPeer()
@@ -184,6 +191,7 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func exchange(with peer: NearbyPeer) {
+        resetExchangeProgress(for: peer.peerID)
         statusMessage = "正在连接 \(peer.name) 交换档案"
         isSending = true
         pendingExchangePeerID = peer.peerID
@@ -203,6 +211,9 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func declineInvitation() {
+        if let peerID = pendingExchangePeerID {
+            sendControlMessage(.cancelExchange, to: peerID)
+        }
         pendingInvitationHandler?(false, nil)
         pendingInvitationHandler = nil
         pendingInvitation = nil
@@ -211,6 +222,13 @@ final class NearbyTransferManager: NSObject, ObservableObject {
     }
 
     func disconnect(from peer: NearbyPeer) {
+        let isCurrentExchangePeer = pendingPeerID == peer.peerID
+            || pendingExchangePeerID == peer.peerID
+            || activeSendPeerID == peer.peerID
+        if isCurrentExchangePeer {
+            cancelledExchangePeerIDs.insert(peer.peerID)
+            sendControlMessage(.cancelExchange, to: peer.peerID)
+        }
         if session.connectedPeers.contains(peer.peerID) {
             session.disconnect()
         }
@@ -218,18 +236,29 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             activeSendTask?.cancel()
             activeSendTask = nil
             activeSendPeerID = nil
+            activeSendOperationID = nil
+        }
+        if pendingPeerID == peer.peerID, let pendingResourceURL {
+            try? FileManager.default.removeItem(at: pendingResourceURL)
+            self.pendingResourceURL = nil
         }
         sendTimeoutID = nil
         pendingPeerID = nil
         pendingExchangePeerID = nil
+        clearExchangeProgress(for: peer.peerID)
         isSending = false
         statusMessage = "已断开 \(peer.name)"
+    }
+
+    func cancelCurrentExchange() {
+        cancelCurrentExchange(notifyPeer: true, statusMessage: "已取消交换")
     }
 
     func failPendingSend(_ message: String) {
         activeSendTask?.cancel()
         activeSendTask = nil
         activeSendPeerID = nil
+        activeSendOperationID = nil
         isSending = false
         if let pendingResourceURL {
             try? FileManager.default.removeItem(at: pendingResourceURL)
@@ -237,6 +266,9 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         sendTimeoutID = nil
         pendingResourceURL = nil
         pendingPeerID = nil
+        if let pendingExchangePeerID {
+            clearExchangeProgress(for: pendingExchangePeerID)
+        }
         pendingExchangePeerID = nil
         statusMessage = message
     }
@@ -262,6 +294,8 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         }
 
         activeSendPeerID = peerID
+        let operationID = UUID()
+        activeSendOperationID = operationID
         isSending = true
         statusMessage = "正在打包档案"
         activeSendTask = Task {
@@ -271,16 +305,24 @@ final class NearbyTransferManager: NSObject, ObservableObject {
                 let url = try await Self.writeTemporaryPackage(data)
                 try Task.checkCancellation()
                 await MainActor.run {
+                    guard self.activeSendOperationID == operationID,
+                          self.activeSendPeerID == peerID,
+                          !self.cancelledExchangePeerIDs.contains(peerID) else {
+                        try? FileManager.default.removeItem(at: url)
+                        return
+                    }
                     self.pendingResourceURL = url
                     self.pendingPeerID = peerID
                     self.sendPendingResource()
                 }
             } catch is CancellationError {
                 await MainActor.run {
+                    guard self.activeSendOperationID == operationID else { return }
                     self.failPendingSend("发送已取消")
                 }
             } catch {
                 await MainActor.run {
+                    guard self.activeSendOperationID == operationID else { return }
                     self.failPendingSend("发送失败：\(error.localizedDescription)")
                 }
             }
@@ -297,6 +339,14 @@ final class NearbyTransferManager: NSObject, ObservableObject {
         }.value
     }
 
+    private static func copyReceivedPackage(from url: URL) throws -> URL {
+        let destinationURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mtcpack")
+        try FileManager.default.copyItem(at: url, to: destinationURL)
+        return destinationURL
+    }
+
     private func sendPendingResource() {
         sendTimeoutID = nil
         guard let url = pendingResourceURL,
@@ -306,35 +356,123 @@ final class NearbyTransferManager: NSObject, ObservableObject {
             return
         }
 
+        let operationID = activeSendOperationID
         statusMessage = "正在交换档案"
         session.sendResource(at: url, withName: url.lastPathComponent, toPeer: peerID) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard self.activeSendOperationID == operationID,
+                      self.activeSendPeerID == peerID,
+                      !self.cancelledExchangePeerIDs.contains(peerID) else {
+                    return
+                }
                 self.activeSendTask = nil
                 self.activeSendPeerID = nil
-                self.isSending = self.pendingExchangePeerID == peerID
+                self.activeSendOperationID = nil
                 self.pendingResourceURL = nil
                 self.pendingPeerID = nil
                 try? FileManager.default.removeItem(at: url)
                 if let error {
                     self.statusMessage = "发送失败：\(error.localizedDescription)"
+                    self.isSending = false
                 } else {
-                    self.statusMessage = "已送出，等待对方档案"
+                    self.markExchangeSent(to: peerID)
                 }
             }
         }
     }
 
     private func sendExchangeMessage(to peerID: MCPeerID) -> Bool {
-        let message = NearbyControlMessage(action: .exchangeCompendium)
+        guard sendControlMessage(.exchangeCompendium, to: peerID) else {
+            return false
+        }
+        statusMessage = "已发起交换"
+        return true
+    }
+
+    @discardableResult
+    private func sendControlMessage(_ action: NearbyControlMessage.Action, to peerID: MCPeerID) -> Bool {
+        let message = NearbyControlMessage(action: action)
         guard let data = try? JSONEncoder().encode(message) else { return false }
         do {
             try session.send(data, toPeers: [peerID], with: .reliable)
-            statusMessage = "已发起交换"
             return true
         } catch {
-            failPendingSend("交换失败：\(error.localizedDescription)")
+            if action != .cancelExchange {
+                failPendingSend("交换失败：\(error.localizedDescription)")
+            }
             return false
+        }
+    }
+
+    private func cancelCurrentExchange(notifyPeer: Bool, statusMessage message: String?) {
+        let peerID = pendingExchangePeerID ?? pendingPeerID ?? activeSendPeerID
+        if let peerID {
+            cancelledExchangePeerIDs.insert(peerID)
+        }
+        if notifyPeer, let peerID {
+            sendControlMessage(.cancelExchange, to: peerID)
+        }
+        activeSendTask?.cancel()
+        activeSendTask = nil
+        activeSendPeerID = nil
+        activeSendOperationID = nil
+        if let pendingResourceURL {
+            try? FileManager.default.removeItem(at: pendingResourceURL)
+        }
+        pendingResourceURL = nil
+        pendingPeerID = nil
+        if let peerID {
+            clearExchangeProgress(for: peerID)
+        }
+        pendingExchangePeerID = nil
+        sendTimeoutID = nil
+        isSending = false
+        pendingInvitationHandler?(false, nil)
+        pendingInvitationHandler = nil
+        pendingInvitation = nil
+        if let peerID, session.connectedPeers.contains(peerID) {
+            session.disconnect()
+        }
+        if let message {
+            statusMessage = message
+        }
+    }
+
+    private func resetExchangeProgress(for peerID: MCPeerID) {
+        exchangeSentPeerIDs.remove(peerID)
+        exchangeReceivedPeerIDs.remove(peerID)
+        cancelledExchangePeerIDs.remove(peerID)
+    }
+
+    private func clearExchangeProgress(for peerID: MCPeerID) {
+        exchangeSentPeerIDs.remove(peerID)
+        exchangeReceivedPeerIDs.remove(peerID)
+    }
+
+    private func markExchangeSent(to peerID: MCPeerID) {
+        exchangeSentPeerIDs.insert(peerID)
+        updateExchangeCompletionStatus(with: peerID)
+    }
+
+    private func markExchangeReceived(from peerID: MCPeerID) {
+        exchangeReceivedPeerIDs.insert(peerID)
+        updateExchangeCompletionStatus(with: peerID)
+    }
+
+    private func updateExchangeCompletionStatus(with peerID: MCPeerID) {
+        let didSend = exchangeSentPeerIDs.contains(peerID)
+        let didReceive = exchangeReceivedPeerIDs.contains(peerID)
+        isSending = didSend && didReceive ? false : pendingExchangePeerID == peerID
+        if didSend && didReceive {
+            sendTimeoutID = nil
+            pendingExchangePeerID = nil
+            clearExchangeProgress(for: peerID)
+            statusMessage = "已完成与 \(peerID.displayName) 的交换"
+        } else if didSend {
+            statusMessage = "已送出，等待对方档案"
+        } else if didReceive {
+            statusMessage = "已收到对方档案，正在发送你的档案"
         }
     }
 
@@ -413,6 +551,7 @@ extension NearbyTransferManager: MCNearbyServiceAdvertiserDelegate {
             let mode: NearbyInvitation.Mode = .exchangingCompendium
             self.pendingInvitationHandler = invitationHandler
             self.pendingExchangePeerID = peerID
+            self.resetExchangeProgress(for: peerID)
             self.pendingInvitation = NearbyInvitation(peerName: peerID.displayName, mode: mode)
             self.statusMessage = "收到 \(peerID.displayName) 的交换邀请"
         }
@@ -431,7 +570,9 @@ extension NearbyTransferManager: MCSessionDelegate {
             case .connecting:
                 self.statusMessage = "正在连接 \(peerID.displayName)"
             case .notConnected:
-                if self.pendingPeerID == peerID || self.pendingExchangePeerID == peerID {
+                if self.cancelledExchangePeerIDs.contains(peerID) {
+                    return
+                } else if self.pendingPeerID == peerID || self.pendingExchangePeerID == peerID {
                     self.failPendingSend("\(peerID.displayName) 已断开")
                 } else {
                     self.statusMessage = "\(peerID.displayName) 已断开"
@@ -450,6 +591,9 @@ extension NearbyTransferManager: MCSessionDelegate {
         withError error: Error?
     ) {
         DispatchQueue.main.async {
+            guard !self.cancelledExchangePeerIDs.contains(peerID) else {
+                return
+            }
             if let error {
                 self.statusMessage = "接收失败：\(error.localizedDescription)"
                 return
@@ -458,20 +602,31 @@ extension NearbyTransferManager: MCSessionDelegate {
                 self.statusMessage = "接收失败"
                 return
             }
-            self.isSending = false
-            self.sendTimeoutID = nil
-            self.pendingExchangePeerID = nil
-            self.statusMessage = "已完成与 \(peerID.displayName) 的交换"
-            self.onReceivedPackage?(localURL)
+            do {
+                let receivedURL = try Self.copyReceivedPackage(from: localURL)
+                self.isSending = false
+                self.sendTimeoutID = nil
+                self.markExchangeReceived(from: peerID)
+                self.onReceivedPackage?(receivedURL)
+            } catch {
+                self.statusMessage = "接收失败：\(error.localizedDescription)"
+            }
         }
     }
 
     func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        guard let message = try? JSONDecoder().decode(NearbyControlMessage.self, from: data),
-              message.action == .exchangeCompendium else { return }
+        guard let message = try? JSONDecoder().decode(NearbyControlMessage.self, from: data) else { return }
         DispatchQueue.main.async {
-            self.pendingExchangePeerID = peerID
-            self.prepareAndSendPackage(to: peerID)
+            switch message.action {
+            case .exchangeCompendium:
+                self.resetExchangeProgress(for: peerID)
+                self.pendingExchangePeerID = peerID
+                self.prepareAndSendPackage(to: peerID)
+            case .cancelExchange:
+                self.cancelCurrentExchange(notifyPeer: false, statusMessage: "\(peerID.displayName) 已取消交换")
+            case .requestCompendium:
+                break
+            }
         }
     }
 
@@ -484,6 +639,9 @@ extension NearbyTransferManager: MCSessionDelegate {
         with progress: Progress
     ) {
         DispatchQueue.main.async {
+            guard !self.cancelledExchangePeerIDs.contains(peerID) else {
+                return
+            }
             self.isSending = true
             self.statusMessage = "正在接收 \(peerID.displayName) 的档案"
         }
