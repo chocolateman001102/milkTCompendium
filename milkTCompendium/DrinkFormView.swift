@@ -191,60 +191,67 @@ struct DrinkFormView: View {
     }
 
     private var photoPreview: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.white)
-
-            if let stickerImage {
-                Button {
-                    showingStickerPreview = true
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        Image(uiImage: stickerImage)
-                            .resizable()
-                            .scaledToFit()
-                            .padding(10)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                        Image(systemName: "plus.magnifyingglass")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .padding(7)
-                            .background(.white.opacity(0.92))
-                            .clipShape(Circle())
-                            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
-                            .padding(8)
-                    }
-                }
-                .buttonStyle(.plain)
-            } else if let originalImage {
-                Image(uiImage: originalImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            } else {
-                VStack(spacing: 7) {
-                    Image(systemName: "camera.viewfinder")
-                        .font(.system(size: 28, weight: .light))
-                    Text("添加照片")
-                        .font(.subheadline.weight(.semibold))
-                    Text("生成贴图")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .foregroundStyle(.secondary)
-            }
-
-            if isProcessing {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.black.opacity(0.28))
-                ProgressView()
-                    .tint(.white)
+                    .fill(.white)
+
+                if let stickerImage {
+                    Button {
+                        showingStickerPreview = true
+                    } label: {
+                        ZStack(alignment: .bottomTrailing) {
+                            Image(uiImage: stickerImage)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(10)
+                                .frame(width: size.width, height: size.height)
+                                .clipped()
+
+                            Image(systemName: "plus.magnifyingglass")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .padding(7)
+                                .background(.white.opacity(0.92))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+                                .padding(8)
+                        }
+                        .frame(width: size.width, height: size.height)
+                    }
+                    .buttonStyle(.plain)
+                } else if let originalImage {
+                    Image(uiImage: originalImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .clipped()
+                } else {
+                    VStack(spacing: 7) {
+                        Image(systemName: "camera.viewfinder")
+                            .font(.system(size: 28, weight: .light))
+                        Text("添加照片")
+                            .font(.subheadline.weight(.semibold))
+                        Text("生成贴图")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                if isProcessing {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.black.opacity(0.28))
+                    ProgressView()
+                        .tint(.white)
+                }
             }
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipped()
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .clipped()
     }
 
     private var photoActions: some View {

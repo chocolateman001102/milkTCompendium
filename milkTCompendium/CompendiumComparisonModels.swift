@@ -219,6 +219,19 @@ enum DrinkProductMatcher {
         return "\(brand)#\(name)"
     }
 
+    static func normalizedName(for item: LadderDrinkDisplayItem) -> String {
+        normalizedToken(item.name)
+    }
+
+    static func normalizedBrand(for item: LadderDrinkDisplayItem) -> String {
+        normalizedToken(item.brand)
+    }
+
+    static func areFallbackBrandsCompatible(_ firstBrand: String, _ secondBrand: String) -> Bool {
+        guard !firstBrand.isEmpty, !secondBrand.isEmpty else { return true }
+        return firstBrand == secondBrand || firstBrand.contains(secondBrand) || secondBrand.contains(firstBrand)
+    }
+
     static func isConservativeFallbackMatch(_ first: LadderDrinkDisplayItem, _ second: LadderDrinkDisplayItem) -> Bool {
         let firstName = normalizedToken(first.name)
         let secondName = normalizedToken(second.name)
@@ -226,8 +239,7 @@ enum DrinkProductMatcher {
 
         let firstBrand = normalizedToken(first.brand)
         let secondBrand = normalizedToken(second.brand)
-        guard !firstBrand.isEmpty, !secondBrand.isEmpty else { return true }
-        return firstBrand == secondBrand || firstBrand.contains(secondBrand) || secondBrand.contains(firstBrand)
+        return areFallbackBrandsCompatible(firstBrand, secondBrand)
     }
 
     private static func normalizedToken(_ value: String) -> String {

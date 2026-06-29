@@ -43,8 +43,10 @@ enum DrinkImageProcessor {
                 }
                 let cutout = UIImage(cgImage: result)
                 return cutout
-                    .bestUprightDrinkOrientation()
+                    .bestUprightDrinkOrientation(sourceSize: CGSize(width: cgImage.width, height: cgImage.height))
                     .resizedAndNormalizedToFit(maxDimension: 1_800)
+                    .removingLikelyHands()
+                    .trimmingTransparentPadding(padding: 8)
                     .addingStickerOutline()
             }
         }.value
@@ -68,7 +70,7 @@ private extension UIImage {
         }
     }
 
-    func bestUprightDrinkOrientation() -> UIImage {
+    func bestUprightDrinkOrientation(sourceSize: CGSize) -> UIImage {
         let candidates = (0...3).map { turns in
             let image = rotatedByQuarterTurns(turns)
             return (turns: turns, image: image, metrics: image.uprightDrinkMetrics)
@@ -76,15 +78,207 @@ private extension UIImage {
         let original = candidates[0]
         let sideways = [candidates[1], candidates[3]]
             .max { $0.metrics.score < $1.metrics.score }
-        let originalLooksSideways = original.image.size.width > original.image.size.height * 1.12
+        let cropAspect = original.image.size.width / max(original.image.size.height, 1)
+        let sourceLooksLandscape = sourceSize.width > sourceSize.height * 1.08
+        let originalLooksSideways = sourceLooksLandscape
+            ? cropAspect > 1.08
+            : cropAspect > 1.32
 
         if originalLooksSideways,
            let sideways,
-           sideways.metrics.score > original.metrics.score + 0.22 {
+           sideways.metrics.score > original.metrics.score + 0.12 ||
+            (sideways.metrics.verticalScore > original.metrics.verticalScore * 1.22 && sideways.metrics.score > original.metrics.score - 0.03) {
             return sideways.image
         }
 
         return original.image
+    }
+
+    func removingLikelyHands() -> UIImage {
+        guard let cgImage else { return self }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 18, height > 18 else { return self }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return self
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var alphaPixelCount = 0
+        var candidate = [Bool](repeating: false, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                let pixelIndex = y * bytesPerRow + x * bytesPerPixel
+                let alpha = pixels[pixelIndex + 3]
+                guard alpha > 40 else { continue }
+                alphaPixelCount += 1
+
+                let red = pixels[pixelIndex]
+                let green = pixels[pixelIndex + 1]
+                let blue = pixels[pixelIndex + 2]
+                let inHandZone = x < width * 34 / 100 || x > width * 66 / 100 || y > height * 42 / 100
+                if inHandZone, Self.looksLikeSkin(red: red, green: green, blue: blue) {
+                    candidate[y * width + x] = true
+                }
+            }
+        }
+
+        var visited = [Bool](repeating: false, count: width * height)
+        var removal = [Bool](repeating: false, count: width * height)
+        let minimumComponentSize = max(80, width * height / 700)
+
+        for start in candidate.indices where candidate[start] && !visited[start] {
+            var stack = [start]
+            var component: [Int] = []
+            visited[start] = true
+            var touchesEdge = false
+            var sidePixels = 0
+            var lowerPixels = 0
+            var minX = width
+            var maxX = 0
+            var minY = height
+            var maxY = 0
+
+            while let current = stack.popLast() {
+                component.append(current)
+                let x = current % width
+                let y = current / width
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+                touchesEdge = touchesEdge || x <= 1 || y <= 1 || x >= width - 2 || y >= height - 2
+                if x < width * 28 / 100 || x > width * 72 / 100 {
+                    sidePixels += 1
+                }
+                if y > height * 48 / 100 {
+                    lowerPixels += 1
+                }
+
+                let neighbors = [
+                    x > 0 ? current - 1 : nil,
+                    x < width - 1 ? current + 1 : nil,
+                    y > 0 ? current - width : nil,
+                    y < height - 1 ? current + width : nil
+                ].compactMap { $0 }
+
+                for next in neighbors where candidate[next] && !visited[next] {
+                    visited[next] = true
+                    stack.append(next)
+                }
+            }
+
+            let size = component.count
+            let sideRatio = CGFloat(sidePixels) / CGFloat(max(size, 1))
+            let lowerRatio = CGFloat(lowerPixels) / CGFloat(max(size, 1))
+            let componentRatio = CGFloat(size) / CGFloat(max(alphaPixelCount, 1))
+            let componentWidthRatio = CGFloat(maxX - minX + 1) / CGFloat(width)
+            let componentHeightRatio = CGFloat(maxY - minY + 1) / CGFloat(height)
+            let shouldRemove = size >= minimumComponentSize && (
+                componentRatio < 0.36 &&
+                    componentWidthRatio < 0.62 &&
+                    componentHeightRatio < 0.74
+            ) && (
+                touchesEdge && (sideRatio > 0.34 || lowerRatio > 0.34) ||
+                    sideRatio > 0.58 && lowerRatio > 0.28
+            )
+            guard shouldRemove else { continue }
+
+            for index in component {
+                let x = index % width
+                let y = index / width
+                for dy in -2...2 {
+                    for dx in -2...2 {
+                        let nextX = x + dx
+                        let nextY = y + dy
+                        guard nextX >= 0, nextY >= 0, nextX < width, nextY < height else { continue }
+                        removal[nextY * width + nextX] = true
+                    }
+                }
+            }
+        }
+
+        guard removal.contains(true) else { return self }
+
+        for index in removal.indices where removal[index] {
+            pixels[index * bytesPerPixel + 3] = 0
+        }
+
+        guard let outputContext = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ),
+              let outputImage = outputContext.makeImage() else {
+            return self
+        }
+        return UIImage(cgImage: outputImage, scale: scale, orientation: .up)
+    }
+
+    func trimmingTransparentPadding(padding: CGFloat) -> UIImage {
+        guard let cgImage else { return self }
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: height * bytesPerRow)
+        guard let context = CGContext(
+            data: &pixels,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return self
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        var minX = width
+        var maxX = 0
+        var minY = height
+        var maxY = 0
+        for y in 0..<height {
+            for x in 0..<width {
+                let alpha = pixels[y * bytesPerRow + x * bytesPerPixel + 3]
+                guard alpha > 24 else { continue }
+                minX = min(minX, x)
+                maxX = max(maxX, x)
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+            }
+        }
+
+        guard maxX > minX, maxY > minY else { return self }
+        let inset = Int(padding.rounded())
+        let crop = CGRect(
+            x: max(0, minX - inset),
+            y: max(0, minY - inset),
+            width: min(width - max(0, minX - inset), maxX - minX + 1 + inset * 2),
+            height: min(height - max(0, minY - inset), maxY - minY + 1 + inset * 2)
+        )
+        guard crop.width < CGFloat(width) || crop.height < CGFloat(height),
+              let cropped = cgImage.cropping(to: crop) else {
+            return self
+        }
+        return UIImage(cgImage: cropped, scale: scale, orientation: .up)
     }
 
     func addingStickerOutline() -> UIImage {
@@ -157,8 +351,23 @@ private extension UIImage {
         }
     }
 
-    private var uprightDrinkMetrics: (score: CGFloat, mouthScore: CGFloat) {
-        guard let cgImage else { return (0, 0) }
+    private static func looksLikeSkin(red: UInt8, green: UInt8, blue: UInt8) -> Bool {
+        let r = Int(red)
+        let g = Int(green)
+        let b = Int(blue)
+        let maxChannel = max(r, max(g, b))
+        let minChannel = min(r, min(g, b))
+        return r > 92 &&
+            g > 48 &&
+            b > 32 &&
+            r >= g &&
+            r > b + 18 &&
+            maxChannel - minChannel > 22 &&
+            abs(r - g) < 96
+    }
+
+    private var uprightDrinkMetrics: (score: CGFloat, mouthScore: CGFloat, verticalScore: CGFloat) {
+        guard let cgImage else { return (0, 0, 0) }
 
         let width = min(cgImage.width, 320)
         let height = max(1, Int(CGFloat(cgImage.height) * CGFloat(width) / CGFloat(cgImage.width)))
@@ -174,7 +383,7 @@ private extension UIImage {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            return (0, 0)
+            return (0, 0, 0)
         }
 
         context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
@@ -204,7 +413,7 @@ private extension UIImage {
             }
         }
 
-        guard alphaCount > 0, maxX > minX, maxY > minY else { return (0, 0) }
+        guard alphaCount > 0, maxX > minX, maxY > minY else { return (0, 0, 0) }
 
         let boundingWidth = CGFloat(maxX - minX + 1)
         let boundingHeight = CGFloat(maxY - minY + 1)
@@ -215,7 +424,7 @@ private extension UIImage {
         let mouthScore = (topWidth - bottomWidth) / max(boundingWidth, 1)
 
         let score = verticalScore * 2 + mouthScore * 1.4 + centroidY * 0.35
-        return (score, mouthScore)
+        return (score, mouthScore, verticalScore)
     }
 
     private func averageRowWidth(from start: Int, to end: Int, rowMinX: [Int], rowMaxX: [Int]) -> CGFloat {

@@ -84,12 +84,12 @@ struct CompendiumComparisonView: View {
         .map { $0 }
     }
 
-    private var currentInitialZoomScale: CGFloat {
-        Self.initialZoomScale(forOwnerCount: comparisonOwners.count)
+    private func currentInitialZoomScale(for owners: [ComparisonOwnerColumn]) -> CGFloat {
+        Self.initialZoomScale(forOwnerCount: owners.count)
     }
 
-    private var comparisonMatchedProductCount: Int {
-        Set(comparisonOwners.flatMap { owner in owner.nodes.map(\.productKey) }).count
+    private func comparisonMatchedProductCount(in owners: [ComparisonOwnerColumn]) -> Int {
+        Set(owners.flatMap { owner in owner.nodes.map(\.productKey) }).count
     }
 
     private var comparisonPartyMembers: [PixelPartyMember] {
@@ -99,7 +99,7 @@ struct CompendiumComparisonView: View {
             pixelPerson: PixelPersonProfile.make(
                 ownerID: SharedCompendiumStore.localOwnerID,
                 ownerName: localOwnerName,
-                drinks: localDrinks
+                profile: TasteScoreCalculator.profile(from: localDrinks)
             ),
             isFocused: false
         )
@@ -107,7 +107,11 @@ struct CompendiumComparisonView: View {
             PixelPartyMember(
                 id: compendium.ownerID,
                 name: compendium.ownerName,
-                pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium),
+                pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(
+                    ownerID: compendium.ownerID,
+                    ownerName: compendium.ownerName,
+                    profile: TasteScoreCalculator.profile(from: compendium)
+                ),
                 isFocused: compendium.ownerID == selectedOwnerID
             )
         }
@@ -158,8 +162,11 @@ struct CompendiumComparisonView: View {
         centerResetToken += 1
     }
 
-    private func overlayRows(for selectedEntry: ComparisonLadderNodeEntry) -> [ComparisonOverlayRow] {
-        comparisonOwners.enumerated().map { index, owner in
+    private func overlayRows(
+        for selectedEntry: ComparisonLadderNodeEntry,
+        owners: [ComparisonOwnerColumn]
+    ) -> [ComparisonOverlayRow] {
+        owners.enumerated().map { index, owner in
             ComparisonOverlayRow(
                 id: owner.id,
                 ownerName: owner.name,
@@ -173,7 +180,10 @@ struct CompendiumComparisonView: View {
     private func matchedGroups(
         for owners: [ComparisonOwnerSource]
     ) -> [(ComparisonOwnerSource, [String: [LadderDrinkDisplayItem]])] {
-        let rawGroupsByOwner = owners.enumerated().map { ownerIndex, owner -> (ComparisonOwnerSource, [RawComparisonProductGroup]) in
+        var rawGroupsByOwner: [(ComparisonOwnerSource, [RawComparisonProductGroup])] = []
+        rawGroupsByOwner.reserveCapacity(owners.count)
+
+        for (ownerIndex, owner) in owners.enumerated() {
             let items: [LadderDrinkDisplayItem] = switch owner {
             case .local:
                 localDrinks.map(LadderDrinkDisplayItem.init(drink:))
@@ -183,14 +193,17 @@ struct CompendiumComparisonView: View {
             let groups = Dictionary(grouping: items, by: DrinkProductMatcher.productKey(for:))
                 .filter { !$0.key.isEmpty }
                 .map { key, items in
-                    RawComparisonProductGroup(
+                    let representative = representativeItem(from: items)
+                    return RawComparisonProductGroup(
                         ownerIndex: ownerIndex,
                         key: key,
                         items: items,
-                        representative: representativeItem(from: items)
+                        representative: representative,
+                        fallbackNameKey: representative.map(DrinkProductMatcher.normalizedName(for:)) ?? "",
+                        fallbackBrandKey: representative.map(DrinkProductMatcher.normalizedBrand(for:)) ?? ""
                     )
                 }
-            return (owner, groups)
+            rawGroupsByOwner.append((owner, groups))
         }
         let rawGroups = rawGroupsByOwner.flatMap(\.1)
         let canonicalKeyByRawGroup = canonicalProductKeys(for: rawGroups)
@@ -216,39 +229,58 @@ struct CompendiumComparisonView: View {
 
     private func canonicalProductKeys(for groups: [RawComparisonProductGroup]) -> [String: String] {
         var parent = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0.id) })
+        var ownerIndexesByRoot = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, Set([$0.ownerIndex])) })
 
         func root(_ id: String) -> String {
             var current = id
+            var path: [String] = []
             while parent[current] != current, let next = parent[current] {
+                path.append(current)
                 current = next
+            }
+            for node in path {
+                parent[node] = current
             }
             return current
         }
 
         func union(_ first: String, _ second: String) {
-            let firstRoot = root(first)
-            let secondRoot = root(second)
+            var firstRoot = root(first)
+            var secondRoot = root(second)
             guard firstRoot != secondRoot else { return }
-            guard canUnion(firstRoot, secondRoot) else { return }
+            guard var firstOwnerIndexes = ownerIndexesByRoot[firstRoot],
+                  let secondOwnerIndexes = ownerIndexesByRoot[secondRoot],
+                  firstOwnerIndexes.isDisjoint(with: secondOwnerIndexes) else { return }
+            if firstOwnerIndexes.count < secondOwnerIndexes.count {
+                swap(&firstRoot, &secondRoot)
+                firstOwnerIndexes = secondOwnerIndexes
+            }
             parent[secondRoot] = firstRoot
+            firstOwnerIndexes.formUnion(ownerIndexesByRoot[secondRoot] ?? [])
+            ownerIndexesByRoot[firstRoot] = firstOwnerIndexes
+            ownerIndexesByRoot[secondRoot] = nil
         }
 
-        func canUnion(_ firstRoot: String, _ secondRoot: String) -> Bool {
-            let firstOwnerIndexes = Set(groups.filter { root($0.id) == firstRoot }.map(\.ownerIndex))
-            let secondOwnerIndexes = Set(groups.filter { root($0.id) == secondRoot }.map(\.ownerIndex))
-            return firstOwnerIndexes.isDisjoint(with: secondOwnerIndexes)
-        }
-
-        for leftIndex in groups.indices {
-            for rightIndex in groups.indices where rightIndex > leftIndex {
-                let left = groups[leftIndex]
-                let right = groups[rightIndex]
-                guard left.ownerIndex != right.ownerIndex else { continue }
-                if left.key == right.key {
+        for sameKeyGroups in Dictionary(grouping: groups, by: \.key).values {
+            for leftIndex in sameKeyGroups.indices {
+                for rightIndex in sameKeyGroups.indices where rightIndex > leftIndex {
+                    let left = sameKeyGroups[leftIndex]
+                    let right = sameKeyGroups[rightIndex]
+                    guard left.ownerIndex != right.ownerIndex else { continue }
                     union(left.id, right.id)
-                } else if let leftRepresentative = left.representative,
-                          let rightRepresentative = right.representative,
-                          DrinkProductMatcher.isConservativeFallbackMatch(leftRepresentative, rightRepresentative) {
+                }
+            }
+        }
+
+        let fallbackGroupsByName = Dictionary(grouping: groups.filter { !$0.fallbackNameKey.isEmpty }, by: \.fallbackNameKey)
+        for sameNameGroups in fallbackGroupsByName.values {
+            for leftIndex in sameNameGroups.indices {
+                for rightIndex in sameNameGroups.indices where rightIndex > leftIndex {
+                    let left = sameNameGroups[leftIndex]
+                    let right = sameNameGroups[rightIndex]
+                    guard left.ownerIndex != right.ownerIndex,
+                          left.key != right.key,
+                          DrinkProductMatcher.areFallbackBrandsCompatible(left.fallbackBrandKey, right.fallbackBrandKey) else { continue }
                     union(left.id, right.id)
                 }
             }
@@ -273,15 +305,18 @@ struct CompendiumComparisonView: View {
     }
 
     var body: some View {
+        let owners = comparisonOwners
+        let matchedProductCount = comparisonMatchedProductCount(in: owners)
+        let partyMembers = comparisonPartyMembers
         ZStack(alignment: .top) {
-            if comparisonOwners.count < 2 || comparisonMatchedProductCount == 0 {
+            if owners.count < 2 || matchedProductCount == 0 {
                 emptyState(title: "还没有共同喝过", subtitle: "至少需要两个人记录过同一款饮品。")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                comparisonLadder
+                comparisonLadder(owners: owners)
             }
 
-            header
+            header(matchedProductCount: matchedProductCount, partyMembers: partyMembers)
                 .padding(.horizontal, 14)
                 .padding(.top, 10)
         }
@@ -292,7 +327,7 @@ struct CompendiumComparisonView: View {
             if let selectedEntry {
                 ComparisonDrinkCardOverlay(
                     selectedEntry: selectedEntry,
-                    rows: overlayRows(for: selectedEntry),
+                    rows: overlayRows(for: selectedEntry, owners: owners),
                     onClose: {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
                             self.selectedEntry = nil
@@ -305,22 +340,23 @@ struct CompendiumComparisonView: View {
         }
     }
 
-    private var comparisonLadder: some View {
+    private func comparisonLadder(owners: [ComparisonOwnerColumn]) -> some View {
         GeometryReader { proxy in
-            let contentKey = layoutCacheKey(viewport: proxy.size)
+            let contentKey = layoutCacheKey(viewport: proxy.size, owners: owners)
             let layoutKey = contentKey
             let layout = layoutCache.snapshot(for: layoutKey) {
-                let canvasSize = canvasSize(for: proxy.size)
+                let canvasSize = canvasSize(for: proxy.size, owners: owners)
                 let metrics = ComparisonLadderMetrics(
                     size: canvasSize,
                     topClearance: Self.ladderTopControlClearance + Self.ladderCanvasVerticalSafePadding,
                     bottomClearance: Self.ladderBottomControlClearance + Self.ladderCanvasVerticalSafePadding
                 )
+                let nodes = nodeEntries(metrics: metrics, owners: owners)
                 return ComparisonLadderLayoutSnapshot(
                     canvasSize: canvasSize,
                     metrics: metrics,
-                    nodes: nodeEntries(metrics: metrics),
-                    connections: connectionEntries(metrics: metrics),
+                    nodes: nodes,
+                    connections: connectionEntries(nodes: nodes, owners: owners),
                     contentSignature: contentKey,
                     layoutSignature: layoutKey
                 )
@@ -336,7 +372,7 @@ struct CompendiumComparisonView: View {
                 selectedProductKey: selectedEntry?.node.productKey,
                 contentSignature: layout.contentSignature,
                 layoutSignature: layout.layoutSignature,
-                initialZoomScale: currentInitialZoomScale,
+                initialZoomScale: currentInitialZoomScale(for: owners),
                 centerResetToken: centerResetToken,
                 onTapNode: { entry in
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -361,7 +397,7 @@ struct CompendiumComparisonView: View {
         }
     }
 
-    private var header: some View {
+    private func header(matchedProductCount: Int, partyMembers: [PixelPartyMember]) -> some View {
         VStack(spacing: 9) {
             HStack(spacing: 10) {
                 Button {
@@ -414,14 +450,14 @@ struct CompendiumComparisonView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 5) {
                         HStack(spacing: 8) {
-                            PixelPartyLineView(members: comparisonPartyMembers, maxVisible: 10)
+                            PixelPartyLineView(members: partyMembers, maxVisible: 10)
                                 .frame(height: 42)
                             Spacer(minLength: 0)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 9, weight: .black))
                                 .foregroundStyle(.secondary)
                         }
-                        Text("\(comparisonMatchedProductCount) 款共同饮品 · \(comparisonPartyMembers.count) 人")
+                        Text("\(matchedProductCount) 款共同饮品 · \(partyMembers.count) 人")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -457,12 +493,12 @@ struct CompendiumComparisonView: View {
         }
     }
 
-    private func layoutCacheKey(viewport: CGSize) -> String {
+    private func layoutCacheKey(viewport: CGSize, owners: [ComparisonOwnerColumn]) -> String {
         let viewportKey = "\(Int(viewport.width.rounded()))x\(Int(viewport.height.rounded()))"
-        let ownerKey = comparisonOwners.map { owner in
+        let ownerKey = owners.map { owner in
             "\(owner.id)#\(owner.name)"
         }.joined(separator: "|")
-        let nodeKey = comparisonOwners.flatMap(\.nodes).map { node in
+        let nodeKey = owners.flatMap(\.nodes).map { node in
             [
                 node.id,
                 String(format: "%.3f", node.aggregateRating),
@@ -473,10 +509,10 @@ struct CompendiumComparisonView: View {
         return "\(sharedCompendium.ownerID):matched-only:user-axis-layout-v3:\(viewportKey):\(ownerKey):\(nodeKey)"
     }
 
-    private func canvasSize(for viewport: CGSize) -> CGSize {
-        let count = CGFloat(max(comparisonOwners.map(\.nodes.count).max() ?? 1, 1))
-        let ownerCount = CGFloat(max(comparisonOwners.count, 2))
-        let initialZoomScale = currentInitialZoomScale
+    private func canvasSize(for viewport: CGSize, owners: [ComparisonOwnerColumn]) -> CGSize {
+        let count = CGFloat(max(owners.map(\.nodes.count).max() ?? 1, 1))
+        let ownerCount = CGFloat(max(owners.count, 2))
+        let initialZoomScale = currentInitialZoomScale(for: owners)
         let overviewWidth = viewport.width / initialZoomScale * 0.98
         let overviewHeight = viewport.height / initialZoomScale * 0.98
         let ownerWidth = (ownerCount - 1) * ComparisonLadderMetrics.ownerLaneSpacing + 420
@@ -493,9 +529,9 @@ struct CompendiumComparisonView: View {
         return min(initialZoomScale, max(0.20, scaled))
     }
 
-    private func nodeEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderNodeEntry] {
-        comparisonOwners.enumerated().flatMap { index, owner in
-            entries(for: owner.nodes, owner: owner, ownerIndex: index, ownerCount: comparisonOwners.count, metrics: metrics)
+    private func nodeEntries(metrics: ComparisonLadderMetrics, owners: [ComparisonOwnerColumn]) -> [ComparisonLadderNodeEntry] {
+        owners.enumerated().flatMap { index, owner in
+            entries(for: owner.nodes, owner: owner, ownerIndex: index, ownerCount: owners.count, metrics: metrics)
         }
         .sorted { first, second in
             if first.position.y == second.position.y {
@@ -585,16 +621,18 @@ struct CompendiumComparisonView: View {
         return CGSize(width: rawX + edgeBias, height: 0)
     }
 
-    private func connectionEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderConnectionEntry] {
-        let nodeEntries = nodeEntries(metrics: metrics)
+    private func connectionEntries(
+        nodes nodeEntries: [ComparisonLadderNodeEntry],
+        owners: [ComparisonOwnerColumn]
+    ) -> [ComparisonLadderConnectionEntry] {
         let entriesByOwner = Dictionary(grouping: nodeEntries, by: \.ownerID)
         let varianceByProduct = productRatingVarianceByKey(from: nodeEntries)
-        let coverageByProduct = productCoverageByKey(from: nodeEntries)
+        let coverageByProduct = productCoverageByKey(from: nodeEntries, ownerCount: owners.count)
         var connections: [ComparisonLadderConnectionEntry] = []
-        for leftIndex in comparisonOwners.indices {
-            for rightIndex in comparisonOwners.indices where rightIndex > leftIndex {
-                let leftOwner = comparisonOwners[leftIndex]
-                let rightOwner = comparisonOwners[rightIndex]
+        for leftIndex in owners.indices {
+            for rightIndex in owners.indices where rightIndex > leftIndex {
+                let leftOwner = owners[leftIndex]
+                let rightOwner = owners[rightIndex]
                 let leftByProduct = Dictionary(uniqueKeysWithValues: (entriesByOwner[leftOwner.id] ?? []).map { ($0.node.productKey, $0) })
                 let rightByProduct = Dictionary(uniqueKeysWithValues: (entriesByOwner[rightOwner.id] ?? []).map { ($0.node.productKey, $0) })
                 for productKey in Set(leftByProduct.keys).intersection(rightByProduct.keys).sorted() {
@@ -633,8 +671,8 @@ struct CompendiumComparisonView: View {
             }
     }
 
-    private func productCoverageByKey(from entries: [ComparisonLadderNodeEntry]) -> [String: CGFloat] {
-        let ownerCount = max(comparisonOwners.count, 1)
+    private func productCoverageByKey(from entries: [ComparisonLadderNodeEntry], ownerCount rawOwnerCount: Int) -> [String: CGFloat] {
+        let ownerCount = max(rawOwnerCount, 1)
         return Dictionary(grouping: entries, by: { $0.node.productKey })
             .mapValues { productEntries in
                 let drinkerCount = Set(productEntries.map(\.ownerID)).count
@@ -738,6 +776,8 @@ private struct RawComparisonProductGroup: Identifiable {
     let key: String
     let items: [LadderDrinkDisplayItem]
     let representative: LadderDrinkDisplayItem?
+    let fallbackNameKey: String
+    let fallbackBrandKey: String
 
     var id: String {
         "\(ownerIndex)#\(key)"
@@ -1268,7 +1308,11 @@ private final class ComparisonLadderCanvasUIView: UIView {
         axisLayer.addSublayer(scoreTextLayer)
     }
 
-    private func rebuildConnections(metrics: ComparisonLadderMetrics, connections: [ComparisonLadderConnectionEntry], animatesLayout: Bool) {
+    private func rebuildConnections(
+        metrics: ComparisonLadderMetrics,
+        connections: [ComparisonLadderConnectionEntry],
+        animatesLayout: Bool
+    ) {
         let liveIDs = Set(connections.map(\.id))
         for (id, layer) in connectionLayers where !liveIDs.contains(id) {
             layer.removeFromSuperlayer()
@@ -1695,6 +1739,9 @@ struct PixelPartyMember: Identifiable, Hashable {
 struct PixelPartyLineView: View {
     let members: [PixelPartyMember]
     var maxVisible: Int = 10
+    private let personWidth: CGFloat = 29
+    private let personHeight: CGFloat = 36
+    private let personSpacing: CGFloat = -2
 
     private var visibleMembers: [PixelPartyMember] {
         Array(members.prefix(maxVisible))
@@ -1705,12 +1752,19 @@ struct PixelPartyLineView: View {
     }
 
     var body: some View {
-        HStack(spacing: -5) {
-            ForEach(visibleMembers) { member in
-                PixelTinyPersonView(profile: member.pixelPerson, isFocused: member.isFocused)
-                    .frame(width: 34, height: 42)
-                    .accessibilityLabel("\(member.name) 的像素小小人")
+        HStack(spacing: 4) {
+            ZStack(alignment: .leading) {
+                handLinkLayer
+
+                HStack(spacing: personSpacing) {
+                    ForEach(visibleMembers) { member in
+                        PixelTinyPersonView(profile: member.pixelPerson, isFocused: member.isFocused)
+                            .frame(width: personWidth, height: personHeight)
+                            .accessibilityLabel("\(member.name) 的像素小小人")
+                    }
+                }
             }
+            .frame(width: partyWidth, height: personHeight)
 
             if remainingCount > 0 {
                 Text("+\(remainingCount)")
@@ -1729,6 +1783,28 @@ struct PixelPartyLineView: View {
         }
         .accessibilityElement(children: .contain)
     }
+
+    private var partyWidth: CGFloat {
+        guard visibleMembers.count > 0 else { return 0 }
+        return CGFloat(visibleMembers.count) * personWidth + CGFloat(max(visibleMembers.count - 1, 0)) * personSpacing
+    }
+
+    private var handLinkLayer: some View {
+        Canvas { context, _ in
+            guard visibleMembers.count > 1 else { return }
+            for index in 0..<(visibleMembers.count - 1) {
+                let left = visibleMembers[index].pixelPerson
+                let startX = CGFloat(index) * (personWidth + personSpacing) + personWidth - 3
+                let endX = CGFloat(index + 1) * (personWidth + personSpacing) + 3
+                let y = personHeight * 0.50
+                let skin = Color(pixelHex: left.skinHex)
+                let link = CGRect(x: startX, y: y, width: max(1, endX - startX), height: 3)
+                context.fill(Path(link), with: .color(skin))
+                context.stroke(Path(link), with: .color(.black.opacity(0.16)), lineWidth: 0.7)
+            }
+        }
+        .allowsHitTesting(false)
+    }
 }
 
 struct PixelTinyPersonView: View {
@@ -1737,10 +1813,10 @@ struct PixelTinyPersonView: View {
 
     var body: some View {
         Canvas { context, size in
-            let unit = max(1, floor(min(size.width / 16, size.height / 22)))
+            let unit = max(1, floor(min(size.width / 16, size.height / 19)))
             let origin = CGPoint(
                 x: floor((size.width - unit * 16) / 2),
-                y: floor((size.height - unit * 22) / 2)
+                y: floor((size.height - unit * 19) / 2)
             )
 
             func rect(_ x: Int, _ y: Int, _ width: Int, _ height: Int, _ color: Color) {
@@ -1761,20 +1837,20 @@ struct PixelTinyPersonView: View {
             let outline = Color.black.opacity(0.72)
             let cheek = Color.red.opacity(0.36)
 
-            rect(0, 11, 4, 2, skin)
-            rect(12, 11, 4, 2, skin)
-            rect(2, 12, 2, 1, skin)
-            rect(12, 12, 2, 1, skin)
+            rect(0, 10, 5, 2, skin)
+            rect(11, 10, 5, 2, skin)
+            rect(1, 11, 3, 1, skin)
+            rect(12, 11, 3, 1, skin)
 
-            rect(5, 13, 6, 5, bottom)
+            rect(5, 13, 6, 3, bottom)
             rect(6, 12, 4, 2, top)
-            rect(5, 10, 6, 4, top)
-            rect(7, 9, 2, 2, accent)
+            rect(5, 9, 6, 4, top)
+            rect(7, 8, 2, 2, accent)
 
-            rect(5, 18, 2, 3, bottom)
-            rect(9, 18, 2, 3, bottom)
-            rect(4, 21, 3, 1, outline)
-            rect(9, 21, 3, 1, outline)
+            rect(5, 16, 2, 2, bottom)
+            rect(9, 16, 2, 2, bottom)
+            rect(4, 18, 3, 1, outline)
+            rect(9, 18, 3, 1, outline)
 
             rect(5, 4, 6, 6, skin)
             rect(5, 3, 6, 2, hair)
@@ -1816,8 +1892,8 @@ struct PixelTinyPersonView: View {
             case 2:
                 rect(7, 2, 2, 1, accent)
             default:
-                rect(11, 10, 2, 3, accent)
-                rect(12, 9, 1, 1, Color.white.opacity(0.88))
+                rect(11, 9, 2, 3, accent)
+                rect(12, 8, 1, 1, Color.white.opacity(0.88))
             }
 
             if isFocused {
