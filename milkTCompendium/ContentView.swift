@@ -75,6 +75,9 @@ struct ContentView: View {
         .onOpenURL { url in
             importSharedCompendium(from: url)
         }
+        .onReceive(sharedStore.$compendiums) { compendiums in
+            tasteStatsStore.recordImportedCompendiumsIfMissing(compendiums)
+        }
         .dismissKeyboardOnTap()
     }
 
@@ -118,11 +121,25 @@ struct ContentView: View {
             }
 
             do {
-                _ = try await sharedStore.importArchive(at: url)
+                let compendium = try await sharedStore.importArchive(at: url)
+                recordImportedSharedCompendium(compendium)
             } catch {
                 cameraErrorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func recordImportedSharedCompendium(_ compendium: SharedCompendium) {
+        let profile = TasteScoreCalculator.profile(from: compendium)
+        tasteStatsStore.recordSuccessfulExchange(
+            ownerID: compendium.ownerID,
+            ownerName: compendium.ownerName,
+            drinkCount: TasteScoreCalculator.totalActualCupCount(profile: profile),
+            effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
+            averageRating: TasteScoreCalculator.averageRating(profile: profile),
+            profile: profile,
+            pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium)
+        )
     }
 
 }

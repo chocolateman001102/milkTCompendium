@@ -8,6 +8,7 @@ struct SharedCompendium: Codable, Identifiable {
     var ownerName: String
     var exportedAt: Date
     var drinks: [SharedDrink]
+    var pixelPerson: PixelPersonProfile? = nil
 
     var id: String {
         ownerID
@@ -99,6 +100,7 @@ struct SharedCompendiumArchive: Codable {
     var ownerName: String
     var exportedAt: Date
     var drinks: [SharedDrinkArchive]
+    var pixelPerson: PixelPersonProfile? = nil
 }
 
 struct SharedDrinkArchive: Codable {
@@ -375,7 +377,12 @@ final class SharedCompendiumStore: ObservableObject {
                 ownerID: archive.ownerID,
                 ownerName: archive.ownerName,
                 exportedAt: archive.exportedAt,
-                drinks: drinks
+                drinks: drinks,
+                pixelPerson: archive.pixelPerson ?? PixelPersonProfile.make(
+                    ownerID: archive.ownerID,
+                    ownerName: archive.ownerName,
+                    archivedDrinks: archive.drinks
+                )
             )
 
             let encoder = JSONEncoder()
@@ -455,6 +462,11 @@ final class SharedCompendiumStore: ObservableObject {
         }
         let ownerID = localOwnerID
         return try await Task.detached(priority: .userInitiated) {
+            let pixelPerson = PixelPersonProfile.make(
+                ownerID: ownerID,
+                ownerName: ownerName,
+                snapshots: snapshots
+            )
             let archive = SharedCompendiumArchive(
                 version: packageVersion,
                 ownerID: ownerID,
@@ -480,7 +492,8 @@ final class SharedCompendiumStore: ObservableObject {
                         stickerPixelWidth: sticker?.width,
                         stickerPixelHeight: sticker?.height
                     )
-                }
+                },
+                pixelPerson: pixelPerson
             )
 
             let encoder = JSONEncoder()

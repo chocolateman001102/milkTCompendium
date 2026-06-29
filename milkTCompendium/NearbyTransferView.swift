@@ -466,6 +466,7 @@ private struct NearbyTransferSessionView: View {
                     ForEach(sharedStore.compendiums) { compendium in
                         ExchangedArchiveRow(
                             compendium: compendium,
+                            pixelPerson: pixelPerson(for: compendium),
                             onCompare: {
                                 onCompare(compendium)
                             },
@@ -603,6 +604,12 @@ private struct NearbyTransferSessionView: View {
         sharedStore.compendiums.first { $0.ownerID == peer.stableID }
     }
 
+    private func pixelPerson(for compendium: SharedCompendium) -> PixelPersonProfile {
+        tasteStatsStore.stats.peers.first { $0.ownerID == compendium.ownerID }?.pixelPerson
+            ?? compendium.pixelPerson
+            ?? PixelPersonProfile.make(compendium: compendium)
+    }
+
     private func makePackageData() async throws -> Data {
         let snapshots = SharedCompendiumStore.exportSnapshots(from: drinks)
         return try await SharedCompendiumStore.exportArchiveData(
@@ -626,7 +633,8 @@ private struct NearbyTransferSessionView: View {
                     drinkCount: TasteScoreCalculator.totalActualCupCount(profile: profile),
                     effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
                     averageRating: TasteScoreCalculator.averageRating(profile: profile),
-                    profile: profile
+                    profile: profile,
+                    pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium)
                 )
                 onImported(compendium)
                 message = existingOwnerIDs.contains(compendium.ownerID)
@@ -690,11 +698,17 @@ private enum ArchiveReferenceTypography {
 
 private struct ExchangedArchiveRow: View {
     let compendium: SharedCompendium
+    let pixelPerson: PixelPersonProfile
     let onCompare: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
+            PixelTinyPersonView(profile: pixelPerson)
+                .frame(width: 38, height: 46)
+                .padding(.top, 1)
+                .accessibilityLabel("\(compendium.ownerName) 的像素小小人")
+
             VStack(alignment: .leading, spacing: 5) {
                 Text(compendium.ownerName)
                     .font(ArchiveReferenceTypography.title(16))

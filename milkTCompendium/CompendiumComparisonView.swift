@@ -2,9 +2,9 @@ import SwiftUI
 import UIKit
 
 struct CompendiumComparisonView: View {
-    fileprivate static let minimumZoomScale: CGFloat = 0.36
+    fileprivate static let minimumZoomScale: CGFloat = 0.18
     fileprivate static let initialZoomScale: CGFloat = 0.40
-    private static let ladderTopControlClearance: CGFloat = 154
+    private static let ladderTopControlClearance: CGFloat = 176
     private static let ladderBottomControlClearance: CGFloat = 42
     private static let ladderCanvasVerticalSafePadding: CGFloat = 64
 
@@ -15,9 +15,10 @@ struct CompendiumComparisonView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedOwnerID: String
+    @State private var orderedSharedOwnerIDs: [String]
     @State private var zoomScale: CGFloat = Self.initialZoomScale
     @State private var centerResetToken = 0
-    @State private var selectedNode: ComparisonDrinkNode?
+    @State private var selectedEntry: ComparisonLadderNodeEntry?
     @StateObject private var layoutCache = ComparisonLadderLayoutCache()
 
     init(
@@ -30,44 +31,251 @@ struct CompendiumComparisonView: View {
         self.sharedCompendiums = sharedCompendiums
         self.initialOwnerID = initialOwnerID
         self.localOwnerName = localOwnerName
+        let shuffledOwnerIDs = Self.shuffledOwnerIDs(sharedCompendiums: sharedCompendiums, preferredFirstOwnerID: initialOwnerID)
         _selectedOwnerID = State(initialValue: initialOwnerID)
+        _orderedSharedOwnerIDs = State(initialValue: shuffledOwnerIDs)
     }
 
     private var sharedCompendium: SharedCompendium {
-        sharedCompendiums.first { $0.ownerID == selectedOwnerID }
+        orderedSharedCompendiums.first
+            ?? sharedCompendiums.first { $0.ownerID == selectedOwnerID }
             ?? sharedCompendiums.first
             ?? SharedCompendium(ownerID: initialOwnerID, ownerName: "TA", exportedAt: .distantPast, drinks: [])
     }
 
-    private var comparison: CompendiumComparison {
-        CompendiumComparisonBuilder.build(
-            localDrinks: localDrinks,
-            sharedCompendium: sharedCompendium,
-            localOwnerName: localOwnerName
+    private var orderedSharedCompendiums: [SharedCompendium] {
+        let byOwnerID = Dictionary(uniqueKeysWithValues: sharedCompendiums.map { ($0.ownerID, $0) })
+        let ordered = orderedSharedOwnerIDs.compactMap { byOwnerID[$0] }
+        let missing = sharedCompendiums.filter { compendium in
+            !orderedSharedOwnerIDs.contains(compendium.ownerID)
+        }
+        return ordered + missing
+    }
+
+    private var comparisonOwners: [ComparisonOwnerColumn] {
+        let owners: [ComparisonOwnerSource] = [.local(localOwnerName)] + orderedSharedCompendiums.map { .shared($0) }
+        let groupsByOwner = matchedGroups(for: owners)
+        let sharedKeys = groupsByOwner
+            .flatMap { $0.1.keys }
+            .reduce(into: [:]) { counts, key in counts[key, default: 0] += 1 }
+            .filter { $0.value >= 2 }
+            .map(\.key)
+        let sharedKeySet = Set(sharedKeys)
+
+        return groupsByOwner.map { owner, groups in
+            let nodes = groups
+                .filter { sharedKeySet.contains($0.key) }
+                .map { key, items in
+                    makeNode(
+                        owner: owner,
+                        key: key,
+                        items: items
+                    )
+                }
+                .sorted { first, second in
+                    if first.aggregateRating == second.aggregateRating {
+                        return first.displayName.localizedStandardCompare(second.displayName) == .orderedAscending
+                    }
+                    return first.aggregateRating > second.aggregateRating
+                }
+            return ComparisonOwnerColumn(id: owner.id, name: owner.name, nodes: nodes)
+        }
+        .filter { !$0.nodes.isEmpty }
+        .map { $0 }
+    }
+
+    private var currentInitialZoomScale: CGFloat {
+        Self.initialZoomScale(forOwnerCount: comparisonOwners.count)
+    }
+
+    private var comparisonMatchedProductCount: Int {
+        Set(comparisonOwners.flatMap { owner in owner.nodes.map(\.productKey) }).count
+    }
+
+    private var comparisonPartyMembers: [PixelPartyMember] {
+        let localMember = PixelPartyMember(
+            id: "local-\(SharedCompendiumStore.localOwnerID)",
+            name: localOwnerName,
+            pixelPerson: PixelPersonProfile.make(
+                ownerID: SharedCompendiumStore.localOwnerID,
+                ownerName: localOwnerName,
+                drinks: localDrinks
+            ),
+            isFocused: false
         )
+        let sharedMembers = orderedSharedCompendiums.map { compendium in
+            PixelPartyMember(
+                id: compendium.ownerID,
+                name: compendium.ownerName,
+                pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium),
+                isFocused: compendium.ownerID == selectedOwnerID
+            )
+        }
+        return [localMember] + sharedMembers
     }
 
-    private var visibleLocalNodes: [ComparisonDrinkNode] {
-        comparison.pairs.map(\.local)
+    private static func shuffledOwnerIDs(
+        sharedCompendiums: [SharedCompendium],
+        preferredFirstOwnerID: String
+    ) -> [String] {
+        let ids = sharedCompendiums.map(\.ownerID)
+        guard !ids.isEmpty else { return [] }
+        var shuffled = ids.shuffled()
+        if let preferredIndex = shuffled.firstIndex(of: preferredFirstOwnerID) {
+            let preferred = shuffled.remove(at: preferredIndex)
+            shuffled.insert(preferred, at: 0)
+        }
+        return shuffled
     }
 
-    private var visiblePeerNodes: [ComparisonDrinkNode] {
-        comparison.pairs.map(\.peer)
+    private func moveSharedOwnerToFront(_ ownerID: String) {
+        guard let index = orderedSharedOwnerIDs.firstIndex(of: ownerID), index != 0 else { return }
+        var ids = orderedSharedOwnerIDs
+        let owner = ids.remove(at: index)
+        ids.insert(owner, at: 0)
+        applySharedOwnerOrder(ids)
     }
 
-    private var visiblePairs: [ComparisonDrinkPair] {
-        comparison.pairs
+    private func moveSharedOwner(_ ownerID: String, by offset: Int) {
+        guard let index = orderedSharedOwnerIDs.firstIndex(of: ownerID) else { return }
+        let targetIndex = min(max(index + offset, 0), orderedSharedOwnerIDs.count - 1)
+        guard targetIndex != index else { return }
+        var ids = orderedSharedOwnerIDs
+        let owner = ids.remove(at: index)
+        ids.insert(owner, at: targetIndex)
+        applySharedOwnerOrder(ids)
     }
 
-    private var selectedPair: ComparisonDrinkPair? {
-        guard let selectedNode, let pairID = selectedNode.matchedPairID else { return nil }
-        return comparison.pairs.first { $0.id == pairID }
+    private func shuffleSharedOwnerOrder() {
+        applySharedOwnerOrder(orderedSharedOwnerIDs.shuffled())
+    }
+
+    private func applySharedOwnerOrder(_ ownerIDs: [String]) {
+        orderedSharedOwnerIDs = ownerIDs
+        selectedOwnerID = ownerIDs.first ?? initialOwnerID
+        selectedEntry = nil
+        zoomScale = Self.initialZoomScale(forOwnerCount: ownerIDs.count + 1)
+        centerResetToken += 1
+    }
+
+    private func overlayRows(for selectedEntry: ComparisonLadderNodeEntry) -> [ComparisonOverlayRow] {
+        comparisonOwners.enumerated().map { index, owner in
+            ComparisonOverlayRow(
+                id: owner.id,
+                ownerName: owner.name,
+                node: owner.nodes.first { $0.productKey == selectedEntry.node.productKey },
+                accent: ComparisonOwnerPalette.color(index: index),
+                isFocused: owner.id == selectedEntry.ownerID
+            )
+        }
+    }
+
+    private func matchedGroups(
+        for owners: [ComparisonOwnerSource]
+    ) -> [(ComparisonOwnerSource, [String: [LadderDrinkDisplayItem]])] {
+        let rawGroupsByOwner = owners.enumerated().map { ownerIndex, owner -> (ComparisonOwnerSource, [RawComparisonProductGroup]) in
+            let items: [LadderDrinkDisplayItem] = switch owner {
+            case .local:
+                localDrinks.map(LadderDrinkDisplayItem.init(drink:))
+            case .shared(let compendium):
+                compendium.drinks.map { LadderDrinkDisplayItem(sharedDrink: $0, ownerID: compendium.ownerID) }
+            }
+            let groups = Dictionary(grouping: items, by: DrinkProductMatcher.productKey(for:))
+                .filter { !$0.key.isEmpty }
+                .map { key, items in
+                    RawComparisonProductGroup(
+                        ownerIndex: ownerIndex,
+                        key: key,
+                        items: items,
+                        representative: representativeItem(from: items)
+                    )
+                }
+            return (owner, groups)
+        }
+        let rawGroups = rawGroupsByOwner.flatMap(\.1)
+        let canonicalKeyByRawGroup = canonicalProductKeys(for: rawGroups)
+
+        return rawGroupsByOwner.map { owner, groups in
+            var canonicalGroups: [String: [LadderDrinkDisplayItem]] = [:]
+            for group in groups {
+                let canonicalKey = canonicalKeyByRawGroup[group.id] ?? group.key
+                canonicalGroups[canonicalKey, default: []].append(contentsOf: group.items)
+            }
+            return (owner, canonicalGroups)
+        }
+    }
+
+    private func representativeItem(from items: [LadderDrinkDisplayItem]) -> LadderDrinkDisplayItem? {
+        items.sorted { first, second in
+            if first.consumedAt == second.consumedAt {
+                return first.createdAt > second.createdAt
+            }
+            return first.consumedAt > second.consumedAt
+        }.first
+    }
+
+    private func canonicalProductKeys(for groups: [RawComparisonProductGroup]) -> [String: String] {
+        var parent = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0.id) })
+
+        func root(_ id: String) -> String {
+            var current = id
+            while parent[current] != current, let next = parent[current] {
+                current = next
+            }
+            return current
+        }
+
+        func union(_ first: String, _ second: String) {
+            let firstRoot = root(first)
+            let secondRoot = root(second)
+            guard firstRoot != secondRoot else { return }
+            guard canUnion(firstRoot, secondRoot) else { return }
+            parent[secondRoot] = firstRoot
+        }
+
+        func canUnion(_ firstRoot: String, _ secondRoot: String) -> Bool {
+            let firstOwnerIndexes = Set(groups.filter { root($0.id) == firstRoot }.map(\.ownerIndex))
+            let secondOwnerIndexes = Set(groups.filter { root($0.id) == secondRoot }.map(\.ownerIndex))
+            return firstOwnerIndexes.isDisjoint(with: secondOwnerIndexes)
+        }
+
+        for leftIndex in groups.indices {
+            for rightIndex in groups.indices where rightIndex > leftIndex {
+                let left = groups[leftIndex]
+                let right = groups[rightIndex]
+                guard left.ownerIndex != right.ownerIndex else { continue }
+                if left.key == right.key {
+                    union(left.id, right.id)
+                } else if let leftRepresentative = left.representative,
+                          let rightRepresentative = right.representative,
+                          DrinkProductMatcher.isConservativeFallbackMatch(leftRepresentative, rightRepresentative) {
+                    union(left.id, right.id)
+                }
+            }
+        }
+
+        let groupsByRoot = Dictionary(grouping: groups, by: { root($0.id) })
+        let canonicalKeyByRoot = groupsByRoot.mapValues { componentGroups in
+            componentGroups
+                .map(\.key)
+                .sorted { first, second in
+                    if first.count == second.count {
+                        return first.localizedStandardCompare(second) == .orderedAscending
+                    }
+                    return first.count < second.count
+                }
+                .first ?? ""
+        }
+
+        return Dictionary(uniqueKeysWithValues: groups.map { group in
+            (group.id, canonicalKeyByRoot[root(group.id)] ?? group.key)
+        })
     }
 
     var body: some View {
         ZStack(alignment: .top) {
-            if comparison.pairs.isEmpty {
-                emptyState(title: "还没有共同喝过", subtitle: "你和 \(sharedCompendium.ownerName) 暂时没有双方都记录过的饮品。")
+            if comparisonOwners.count < 2 || comparisonMatchedProductCount == 0 {
+                emptyState(title: "还没有共同喝过", subtitle: "至少需要两个人记录过同一款饮品。")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 comparisonLadder
@@ -81,15 +289,13 @@ struct CompendiumComparisonView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
         .overlay {
-            if let selectedNode {
+            if let selectedEntry {
                 ComparisonDrinkCardOverlay(
-                    node: selectedNode,
-                    pair: selectedPair,
-                    localOwnerName: comparison.localOwnerName,
-                    peerOwnerName: comparison.peerOwnerName,
+                    selectedEntry: selectedEntry,
+                    rows: overlayRows(for: selectedEntry),
                     onClose: {
                         withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            self.selectedNode = nil
+                            self.selectedEntry = nil
                         }
                     }
                 )
@@ -97,16 +303,12 @@ struct CompendiumComparisonView: View {
                 .zIndex(30)
             }
         }
-        .onChange(of: selectedOwnerID) { _, _ in
-            selectedNode = nil
-            zoomScale = Self.initialZoomScale
-            centerResetToken += 1
-        }
     }
 
     private var comparisonLadder: some View {
         GeometryReader { proxy in
-            let layoutKey = layoutCacheKey(viewport: proxy.size)
+            let contentKey = layoutCacheKey(viewport: proxy.size)
+            let layoutKey = contentKey
             let layout = layoutCache.snapshot(for: layoutKey) {
                 let canvasSize = canvasSize(for: proxy.size)
                 let metrics = ComparisonLadderMetrics(
@@ -119,7 +321,8 @@ struct CompendiumComparisonView: View {
                     metrics: metrics,
                     nodes: nodeEntries(metrics: metrics),
                     connections: connectionEntries(metrics: metrics),
-                    contentSignature: layoutKey
+                    contentSignature: contentKey,
+                    layoutSignature: layoutKey
                 )
             }
 
@@ -129,15 +332,24 @@ struct CompendiumComparisonView: View {
                 metrics: layout.metrics,
                 nodes: layout.nodes,
                 connections: layout.connections,
-                selectedNodeID: selectedNode?.id,
-                selectedPairID: selectedPair?.id,
+                selectedNodeID: selectedEntry?.id,
+                selectedProductKey: selectedEntry?.node.productKey,
                 contentSignature: layout.contentSignature,
+                layoutSignature: layout.layoutSignature,
+                initialZoomScale: currentInitialZoomScale,
                 centerResetToken: centerResetToken,
-                onTapNode: { node in
+                onTapNode: { entry in
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                        selectedNode = node
+                        selectedEntry = entry
                     }
+                },
+                onTapCluster: { _ in
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    selectedEntry = nil
+                },
+                onTapBlank: {
+                    selectedEntry = nil
                 }
             )
             // Switching the compared owner replaces the canvas, not merely its
@@ -165,50 +377,56 @@ struct CompendiumComparisonView: View {
                 .buttonStyle(.plain)
 
                 Menu {
-                    ForEach(sharedCompendiums) { compendium in
-                        Button {
-                            selectedOwnerID = compendium.ownerID
-                        } label: {
-                            HStack {
-                                Text(compendium.ownerName)
-                                if compendium.ownerID == selectedOwnerID {
-                                    Spacer()
-                                    Text("当前")
-                                }
+                    Button {
+                        shuffleSharedOwnerOrder()
+                    } label: {
+                        Label("随机重排", systemImage: "shuffle")
+                    }
+
+                    Divider()
+
+                    ForEach(Array(orderedSharedCompendiums.enumerated()), id: \.element.ownerID) { index, compendium in
+                        Menu {
+                            Button {
+                                moveSharedOwnerToFront(compendium.ownerID)
+                            } label: {
+                                Label("移到最前", systemImage: "arrow.up.to.line")
                             }
+                            .disabled(index == 0)
+
+                            Button {
+                                moveSharedOwner(compendium.ownerID, by: -1)
+                            } label: {
+                                Label("前移", systemImage: "arrow.up")
+                            }
+                            .disabled(index == 0)
+
+                            Button {
+                                moveSharedOwner(compendium.ownerID, by: 1)
+                            } label: {
+                                Label("后移", systemImage: "arrow.down")
+                            }
+                            .disabled(index == orderedSharedCompendiums.count - 1)
+                        } label: {
+                            Text("\(index + 1). \(compendium.ownerName)")
                         }
                     }
                 } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 5) {
-                            Text("\(comparison.localOwnerName) × \(comparison.peerOwnerName)")
-                                .font(.headline.weight(.black))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            PixelPartyLineView(members: comparisonPartyMembers, maxVisible: 10)
+                                .frame(height: 42)
+                            Spacer(minLength: 0)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 9, weight: .black))
                                 .foregroundStyle(.secondary)
                         }
-                        Text("共同 \(comparison.matchedCount) · 可切换共饮对象")
+                        Text("\(comparisonMatchedProductCount) 款共同饮品 · \(comparisonPartyMembers.count) 人")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-
-                Spacer(minLength: 8)
-                Button {
-                    zoomScale = Self.initialZoomScale
-                    centerResetToken += 1
-                } label: {
-                    Image(systemName: "scope")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 34, height: 32)
-                        .background(Color.black.opacity(0.055))
-                        .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
@@ -241,7 +459,10 @@ struct CompendiumComparisonView: View {
 
     private func layoutCacheKey(viewport: CGSize) -> String {
         let viewportKey = "\(Int(viewport.width.rounded()))x\(Int(viewport.height.rounded()))"
-        let nodeKey = (visibleLocalNodes + visiblePeerNodes).map { node in
+        let ownerKey = comparisonOwners.map { owner in
+            "\(owner.id)#\(owner.name)"
+        }.joined(separator: "|")
+        let nodeKey = comparisonOwners.flatMap(\.nodes).map { node in
             [
                 node.id,
                 String(format: "%.3f", node.aggregateRating),
@@ -249,24 +470,34 @@ struct CompendiumComparisonView: View {
                 node.representative.stickerImageName ?? node.representative.stickerFileURL?.lastPathComponent ?? ""
             ].joined(separator: "#")
         }.joined(separator: "|")
-        return "\(sharedCompendium.ownerID):matched-only:overview-layout-v1:\(viewportKey):\(nodeKey)"
+        return "\(sharedCompendium.ownerID):matched-only:user-axis-layout-v3:\(viewportKey):\(ownerKey):\(nodeKey)"
     }
 
     private func canvasSize(for viewport: CGSize) -> CGSize {
-        let count = CGFloat(max(visibleLocalNodes.count, visiblePeerNodes.count, 1))
-        let overviewWidth = viewport.width / Self.initialZoomScale * 0.98
-        let overviewHeight = viewport.height / Self.initialZoomScale * 0.98
+        let count = CGFloat(max(comparisonOwners.map(\.nodes.count).max() ?? 1, 1))
+        let ownerCount = CGFloat(max(comparisonOwners.count, 2))
+        let initialZoomScale = currentInitialZoomScale
+        let overviewWidth = viewport.width / initialZoomScale * 0.98
+        let overviewHeight = viewport.height / initialZoomScale * 0.98
+        let ownerWidth = (ownerCount - 1) * ComparisonLadderMetrics.ownerLaneSpacing + 420
         let densityHeight = 940 + count * 11 + Self.ladderCanvasVerticalSafePadding * 2
         return CGSize(
-            width: max(overviewWidth, 1040),
+            width: max(overviewWidth, ownerWidth, 1040),
             height: max(overviewHeight, densityHeight)
         )
     }
 
+    private static func initialZoomScale(forOwnerCount ownerCount: Int) -> CGFloat {
+        guard ownerCount > 3 else { return initialZoomScale }
+        let scaled = initialZoomScale / sqrt(CGFloat(ownerCount) / 3)
+        return min(initialZoomScale, max(0.20, scaled))
+    }
+
     private func nodeEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderNodeEntry] {
-        let local = entries(for: visibleLocalNodes, side: .local, metrics: metrics)
-        let peer = entries(for: visiblePeerNodes, side: .peer, metrics: metrics)
-        return (local + peer).sorted { first, second in
+        comparisonOwners.enumerated().flatMap { index, owner in
+            entries(for: owner.nodes, owner: owner, ownerIndex: index, ownerCount: comparisonOwners.count, metrics: metrics)
+        }
+        .sorted { first, second in
             if first.position.y == second.position.y {
                 return first.node.id < second.node.id
             }
@@ -276,17 +507,16 @@ struct CompendiumComparisonView: View {
 
     private func entries(
         for nodes: [ComparisonDrinkNode],
-        side: ComparisonSide,
+        owner: ComparisonOwnerColumn,
+        ownerIndex: Int,
+        ownerCount: Int,
         metrics: ComparisonLadderMetrics
     ) -> [ComparisonLadderNodeEntry] {
         let grouped = Dictionary(grouping: nodes) { node in
-            Int((node.aggregateRating * 10).rounded())
+            Int((node.aggregateRating * 100).rounded())
         }
         var entries: [ComparisonLadderNodeEntry] = []
-        let laneDirection: CGFloat = side == .local ? -1 : 1
-        let anchorX = side == .local ? metrics.localAnchorX : metrics.peerAnchorX
-        let columnSpacing: CGFloat = 58
-        let verticalSpacing: CGFloat = 34
+        let anchorX = metrics.ownerAnchorX(index: ownerIndex, count: ownerCount)
 
         for key in grouped.keys.sorted(by: >) {
             let rowNodes = (grouped[key] ?? []).sorted { first, second in
@@ -295,63 +525,238 @@ struct CompendiumComparisonView: View {
                 }
                 return first.aggregateRating > second.aggregateRating
             }
-            let baseY = yPosition(for: Double(key) / 10, metrics: metrics)
+            let clusterID = ComparisonLadderClusterID(ownerID: owner.id, ratingKey: key).rawValue
+            let baseY = yPosition(for: Double(key) / 100, metrics: metrics)
             for (index, node) in rowNodes.enumerated() {
-                let column = index / 3
-                let rowOffset = CGFloat(index % 3 - 1) * verticalSpacing
-                let position = CGPoint(
-                    x: anchorX + laneDirection * CGFloat(column) * columnSpacing,
-                    y: min(max(metrics.plotTop + 24, baseY + rowOffset), metrics.plotBottom - 24)
+                let horizontalOffset = sameScoreHorizontalOffset(
+                    index: index,
+                    count: rowNodes.count,
+                    ownerIndex: ownerIndex,
+                    ownerCount: ownerCount
                 )
-                let ownerName = side == .local ? comparison.localOwnerName : comparison.peerOwnerName
+                let position = CGPoint(
+                    x: anchorX + horizontalOffset.width,
+                    y: min(max(metrics.plotTop + 24, baseY + horizontalOffset.height), metrics.plotBottom - 24)
+                )
                 entries.append(ComparisonLadderNodeEntry(
                     id: node.id,
                     node: node,
                     position: position,
-                    ownerName: ownerName,
-                    accessibilityLabel: "\(ownerName)，\(node.displayBrand)，\(node.displayName)，评分 \(String(format: "%.2f", node.aggregateRating))"
+                    ownerID: owner.id,
+                    ownerIndex: ownerIndex,
+                    ownerName: owner.name,
+                    clusterID: clusterID,
+                    clusterCount: rowNodes.count,
+                    clusterIndex: index,
+                    isClusterExpanded: true,
+                    isClusterRepresentative: true,
+                    accessibilityLabel: "\(owner.name)，\(node.displayBrand)，\(node.displayName)，评分 \(String(format: "%.2f", node.aggregateRating))"
                 ))
             }
         }
         return entries
     }
 
-    private func connectionEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderConnectionEntry] {
-        let nodeByID = Dictionary(uniqueKeysWithValues: nodeEntries(metrics: metrics).map { ($0.id, $0) })
-        return visiblePairs.compactMap { pair in
-            guard let local = nodeByID[pair.local.id], let peer = nodeByID[pair.peer.id] else { return nil }
-            return ComparisonLadderConnectionEntry(
-                id: pair.id,
-                pair: pair,
-                start: local.position,
-                end: peer.position,
-                color: connectionUIColor(for: pair.id, fallbackKey: pair.productKey, delta: pair.ratingDelta),
-                lineWidth: pair.ratingDelta > 1.5 ? 3.375 : 2.625
-            )
+    private func sameScoreHorizontalOffset(
+        index: Int,
+        count: Int,
+        ownerIndex: Int,
+        ownerCount: Int
+    ) -> CGSize {
+        guard count > 1 else { return .zero }
+        let spacing: CGFloat
+        if count <= 3 {
+            spacing = 122
+        } else if count <= 5 {
+            spacing = 106
+        } else {
+            spacing = 92
         }
+        let centerIndex = CGFloat(count - 1) / 2
+        let rawX = (CGFloat(index) - centerIndex) * spacing
+        let edgeBias: CGFloat
+        if ownerCount > 2, ownerIndex == 0 {
+            edgeBias = -min(46, CGFloat(count - 1) * 10)
+        } else if ownerCount > 2, ownerIndex == ownerCount - 1 {
+            edgeBias = min(46, CGFloat(count - 1) * 10)
+        } else {
+            edgeBias = 0
+        }
+        return CGSize(width: rawX + edgeBias, height: 0)
+    }
+
+    private func connectionEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderConnectionEntry] {
+        let nodeEntries = nodeEntries(metrics: metrics)
+        let entriesByOwner = Dictionary(grouping: nodeEntries, by: \.ownerID)
+        let varianceByProduct = productRatingVarianceByKey(from: nodeEntries)
+        let coverageByProduct = productCoverageByKey(from: nodeEntries)
+        var connections: [ComparisonLadderConnectionEntry] = []
+        for leftIndex in comparisonOwners.indices {
+            for rightIndex in comparisonOwners.indices where rightIndex > leftIndex {
+                let leftOwner = comparisonOwners[leftIndex]
+                let rightOwner = comparisonOwners[rightIndex]
+                let leftByProduct = Dictionary(uniqueKeysWithValues: (entriesByOwner[leftOwner.id] ?? []).map { ($0.node.productKey, $0) })
+                let rightByProduct = Dictionary(uniqueKeysWithValues: (entriesByOwner[rightOwner.id] ?? []).map { ($0.node.productKey, $0) })
+                for productKey in Set(leftByProduct.keys).intersection(rightByProduct.keys).sorted() {
+                    guard let start = leftByProduct[productKey], let end = rightByProduct[productKey] else { continue }
+                    let variance = varianceByProduct[productKey] ?? 0
+                    let coverage = coverageByProduct[productKey] ?? 1
+                    let id = "connection-\(leftOwner.id)-\(rightOwner.id)-\(productKey)"
+                    connections.append(ComparisonLadderConnectionEntry(
+                        id: id,
+                        productKey: productKey,
+                        startNodeID: start.id,
+                        endNodeID: end.id,
+                        ratingVariance: variance,
+                        coverageRatio: coverage,
+                        start: start.position,
+                        end: end.position,
+                        color: connectionUIColor(forVariance: variance),
+                        lineWidth: connectionLineWidth(forVariance: variance)
+                    ))
+                }
+            }
+        }
+        return connections
+    }
+
+    private func productRatingVarianceByKey(from entries: [ComparisonLadderNodeEntry]) -> [String: Double] {
+        Dictionary(grouping: entries, by: { $0.node.productKey })
+            .mapValues { productEntries in
+                let ratings = productEntries.map(\.node.aggregateRating)
+                guard !ratings.isEmpty else { return 0 }
+                let mean = ratings.reduce(0, +) / Double(ratings.count)
+                return ratings.reduce(0) { partial, rating in
+                    let delta = rating - mean
+                    return partial + delta * delta
+                } / Double(ratings.count)
+            }
+    }
+
+    private func productCoverageByKey(from entries: [ComparisonLadderNodeEntry]) -> [String: CGFloat] {
+        let ownerCount = max(comparisonOwners.count, 1)
+        return Dictionary(grouping: entries, by: { $0.node.productKey })
+            .mapValues { productEntries in
+                let drinkerCount = Set(productEntries.map(\.ownerID)).count
+                return min(1, max(0, CGFloat(drinkerCount) / CGFloat(ownerCount)))
+            }
     }
 
     private func yPosition(for rating: Double, metrics: ComparisonLadderMetrics) -> CGFloat {
         metrics.plotTop + CGFloat(5 - min(5, max(0, rating))) / 5 * metrics.plotHeight
     }
 
-    private func connectionUIColor(for pairID: String?, fallbackKey: String, delta: Double) -> UIColor {
-        let palette = [
-            UIColor.black.withAlphaComponent(0.78),
-            UIColor(red: 0.30, green: 0.22, blue: 0.16, alpha: 1),
-            UIColor(red: 0.44, green: 0.34, blue: 0.24, alpha: 1),
-            UIColor(red: 0.56, green: 0.46, blue: 0.34, alpha: 1),
-            UIColor(red: 0.24, green: 0.28, blue: 0.25, alpha: 1),
-            UIColor(red: 0.36, green: 0.30, blue: 0.27, alpha: 1)
-        ]
-        let seed = (pairID ?? fallbackKey).unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }
-        var color = palette[abs(seed) % palette.count]
-        if delta > 1.5 {
-            color = color.blended(with: UIColor.black, amount: 0.18)
-        } else if delta <= 0.5 {
-            color = color.blended(with: UIColor.white, amount: 0.12)
+    private func connectionUIColor(forVariance variance: Double) -> UIColor {
+        switch variance {
+        case 1.20...:
+            return UIColor(red: 0.93, green: 0.18, blue: 0.16, alpha: 1)
+        case 0.35..<1.20:
+            return UIColor(red: 0.88, green: 0.68, blue: 0.18, alpha: 1)
+        default:
+            return UIColor(red: 0.05, green: 0.62, blue: 0.28, alpha: 1)
         }
-        return color
+    }
+
+    private func connectionLineWidth(forVariance variance: Double) -> CGFloat {
+        switch variance {
+        case 1.20...:
+            return 3.9
+        case 0.35..<1.20:
+            return 3.35
+        default:
+            return 3.0
+        }
+    }
+
+    private func makeNode(
+        owner: ComparisonOwnerSource,
+        key: String,
+        items: [LadderDrinkDisplayItem]
+    ) -> ComparisonDrinkNode {
+        let sortedItems = items.sorted { first, second in
+            if first.consumedAt == second.consumedAt {
+                return first.createdAt > second.createdAt
+            }
+            return first.consumedAt > second.consumedAt
+        }
+        let totalCupCount = sortedItems.reduce(0) { $0 + max(1, $1.cupCount) }
+        let weightedScore = sortedItems.reduce(0) { partial, item in
+            partial + item.rating * Double(max(1, item.cupCount))
+        }
+        let aggregateRating = totalCupCount > 0 ? weightedScore / Double(totalCupCount) : (sortedItems.first?.rating ?? 0)
+        let representative = sortedItems.first ?? items[0]
+        return ComparisonDrinkNode(
+            id: "\(owner.id)-\(key)",
+            side: owner.isLocal ? .local : .peer,
+            productKey: key,
+            representative: representative,
+            items: sortedItems,
+            aggregateRating: min(5, max(0, aggregateRating)),
+            totalCupCount: max(1, totalCupCount),
+            consumedCount: sortedItems.count,
+            matchedPairID: nil
+        )
+    }
+}
+
+private enum ComparisonOwnerSource {
+    case local(String)
+    case shared(SharedCompendium)
+
+    var id: String {
+        switch self {
+        case .local:
+            return "local"
+        case .shared(let compendium):
+            return "shared-\(compendium.ownerID)"
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .local(let name):
+            return name
+        case .shared(let compendium):
+            return compendium.ownerName
+        }
+    }
+
+    var isLocal: Bool {
+        if case .local = self { return true }
+        return false
+    }
+}
+
+private struct ComparisonOwnerColumn: Identifiable {
+    let id: String
+    let name: String
+    let nodes: [ComparisonDrinkNode]
+}
+
+private struct RawComparisonProductGroup: Identifiable {
+    let ownerIndex: Int
+    let key: String
+    let items: [LadderDrinkDisplayItem]
+    let representative: LadderDrinkDisplayItem?
+
+    var id: String {
+        "\(ownerIndex)#\(key)"
+    }
+}
+
+private enum ComparisonOwnerPalette {
+    private static let uiColors = [
+        UIColor(red: 0.70, green: 0.48, blue: 0.30, alpha: 1),
+        UIColor(red: 0.38, green: 0.48, blue: 0.76, alpha: 1),
+        UIColor(red: 0.24, green: 0.50, blue: 0.38, alpha: 1)
+    ]
+
+    static func uiColor(index: Int) -> UIColor {
+        uiColors[max(0, index) % uiColors.count]
+    }
+
+    static func color(index: Int) -> Color {
+        Color(uiColor(index: index))
     }
 }
 
@@ -376,9 +781,12 @@ private struct ComparisonLadderLayoutSnapshot {
     let nodes: [ComparisonLadderNodeEntry]
     let connections: [ComparisonLadderConnectionEntry]
     let contentSignature: String
+    let layoutSignature: String
 }
 
 private struct ComparisonLadderMetrics {
+    static let ownerLaneSpacing: CGFloat = 250
+
     let size: CGSize
     let topClearance: CGFloat
     let plotTop: CGFloat
@@ -401,19 +809,46 @@ private struct ComparisonLadderMetrics {
     var plotHeight: CGFloat {
         max(1, plotBottom - plotTop)
     }
+
+    func ownerAnchorX(index: Int, count: Int) -> CGFloat {
+        guard count > 1 else { return centerX }
+        let usableWidth = min(size.width - 220, CGFloat(count - 1) * Self.ownerLaneSpacing)
+        let startX = centerX - usableWidth / 2
+        return startX + CGFloat(index) / CGFloat(count - 1) * usableWidth
+    }
 }
 
 private struct ComparisonLadderNodeEntry {
     let id: String
     let node: ComparisonDrinkNode
     let position: CGPoint
+    let ownerID: String
+    let ownerIndex: Int
     let ownerName: String
+    let clusterID: String
+    let clusterCount: Int
+    let clusterIndex: Int
+    let isClusterExpanded: Bool
+    let isClusterRepresentative: Bool
     let accessibilityLabel: String
+}
+
+private struct ComparisonLadderClusterID {
+    let ownerID: String
+    let ratingKey: Int
+
+    var rawValue: String {
+        "\(ownerID)-\(ratingKey)"
+    }
 }
 
 private struct ComparisonLadderConnectionEntry {
     let id: String
-    let pair: ComparisonDrinkPair
+    let productKey: String
+    let startNodeID: String
+    let endNodeID: String
+    let ratingVariance: Double
+    let coverageRatio: CGFloat
     let start: CGPoint
     let end: CGPoint
     let color: UIColor
@@ -427,13 +862,17 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
     let nodes: [ComparisonLadderNodeEntry]
     let connections: [ComparisonLadderConnectionEntry]
     let selectedNodeID: String?
-    let selectedPairID: String?
+    let selectedProductKey: String?
     let contentSignature: String
+    let layoutSignature: String
+    let initialZoomScale: CGFloat
     let centerResetToken: Int
-    let onTapNode: (ComparisonDrinkNode) -> Void
+    let onTapNode: (ComparisonLadderNodeEntry) -> Void
+    let onTapCluster: (String) -> Void
+    let onTapBlank: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(zoomScale: $zoomScale, onTapNode: onTapNode)
+        Coordinator(zoomScale: $zoomScale, onTapNode: onTapNode, onTapCluster: onTapCluster, onTapBlank: onTapBlank)
     }
 
     func makeUIView(context: Context) -> UIScrollView {
@@ -446,7 +885,7 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         scrollView.pinchGestureRecognizer?.delegate = context.coordinator
         scrollView.minimumZoomScale = CompendiumComparisonView.minimumZoomScale
         scrollView.maximumZoomScale = 2.35
-        scrollView.zoomScale = zoomScale
+        scrollView.zoomScale = initialZoomScale
         scrollView.bouncesZoom = true
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
@@ -469,10 +908,10 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             connections: connections,
             contentSize: contentSize,
             contentSignature: contentSignature,
-            displayScale: zoomScale
+            displayScale: initialZoomScale
         )
-        canvasView.applyZoom(scale: zoomScale, mode: .settled)
-        canvasView.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
+        canvasView.applyZoom(scale: initialZoomScale, mode: .settled)
+        canvasView.updateSelection(nodeID: selectedNodeID, productKey: selectedProductKey)
         scrollView.addSubview(canvasView)
         scrollView.contentSize = contentSize
 
@@ -481,6 +920,8 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         context.coordinator.nodes = nodes
         context.coordinator.contentSize = contentSize
         context.coordinator.contentSignature = contentSignature
+        context.coordinator.layoutSignature = layoutSignature
+        context.coordinator.initialZoomScale = initialZoomScale
         context.coordinator.centerResetToken = centerResetToken
         context.coordinator.viewport.attach(scrollView)
         context.coordinator.viewport.update(
@@ -490,18 +931,23 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
                 y: (metrics.plotTop + metrics.plotBottom) / 2
             )
         )
-        context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
+        context.coordinator.resetViewport(to: initialZoomScale)
         return scrollView
     }
 
     func updateUIView(_ scrollView: UIScrollView, context: Context) {
         let contentDidChange = context.coordinator.contentSignature != contentSignature
+        let layoutDidChange = context.coordinator.layoutSignature != layoutSignature
         let sizeDidChange = context.coordinator.contentSize != contentSize
         let centerResetDidChange = context.coordinator.centerResetToken != centerResetToken
 
         context.coordinator.zoomScale = $zoomScale
+        context.coordinator.onTapNode = onTapNode
+        context.coordinator.onTapCluster = onTapCluster
+        context.coordinator.onTapBlank = onTapBlank
         context.coordinator.nodes = nodes
         context.coordinator.contentSize = contentSize
+        context.coordinator.initialZoomScale = initialZoomScale
         context.coordinator.viewport.update(
             canvasSize: contentSize,
             focusPoint: CGPoint(
@@ -512,6 +958,9 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         if contentDidChange {
             context.coordinator.contentSignature = contentSignature
         }
+        if layoutDidChange {
+            context.coordinator.layoutSignature = layoutSignature
+        }
         if centerResetDidChange {
             context.coordinator.centerResetToken = centerResetToken
         }
@@ -520,14 +969,14 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             context.coordinator.canvasView?.frame = CGRect(origin: .zero, size: contentSize)
         }
         let shouldResetViewport = centerResetDidChange || sizeDidChange || contentDidChange
-        if contentDidChange || sizeDidChange {
+        if contentDidChange || sizeDidChange || layoutDidChange {
             context.coordinator.canvasView?.configure(
                 metrics: metrics,
                 nodes: nodes,
                 connections: connections,
                 contentSize: contentSize,
                 contentSignature: contentSignature,
-                displayScale: shouldResetViewport ? CompendiumComparisonView.initialZoomScale : scrollView.zoomScale
+                displayScale: shouldResetViewport ? initialZoomScale : scrollView.zoomScale
             )
             if !centerResetDidChange {
                 context.coordinator.viewport.clampContentOffset()
@@ -535,31 +984,43 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         }
 
         if shouldResetViewport {
-            context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
+            context.coordinator.resetViewport(to: initialZoomScale)
         } else if !context.coordinator.isZooming,
                   abs(scrollView.zoomScale - zoomScale) > 0.001 {
-            scrollView.setZoomScale(zoomScale, animated: false)
+            context.coordinator.setZoomScale(zoomScale, on: scrollView)
         }
         context.coordinator.canvasView?.applyZoom(scale: scrollView.zoomScale, mode: context.coordinator.isZooming ? .preview : .settled)
-        context.coordinator.canvasView?.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
+        context.coordinator.canvasView?.updateSelection(nodeID: selectedNodeID, productKey: selectedProductKey)
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var zoomScale: Binding<CGFloat>
-        let onTapNode: (ComparisonDrinkNode) -> Void
+        var onTapNode: (ComparisonLadderNodeEntry) -> Void
+        var onTapCluster: (String) -> Void
+        var onTapBlank: () -> Void
         weak var canvasView: ComparisonLadderCanvasUIView?
         weak var scrollView: UIScrollView?
         let viewport = ZoomCanvasViewportController()
         var nodes: [ComparisonLadderNodeEntry] = []
         var contentSize: CGSize = .zero
         var contentSignature = ""
+        var layoutSignature = ""
+        var initialZoomScale = CompendiumComparisonView.initialZoomScale
         var centerResetToken = 0
         var isZooming = false
         private var lastReportedZoomScale: CGFloat = 0
+        private var isApplyingProgrammaticViewportChange = false
 
-        init(zoomScale: Binding<CGFloat>, onTapNode: @escaping (ComparisonDrinkNode) -> Void) {
+        init(
+            zoomScale: Binding<CGFloat>,
+            onTapNode: @escaping (ComparisonLadderNodeEntry) -> Void,
+            onTapCluster: @escaping (String) -> Void,
+            onTapBlank: @escaping () -> Void
+        ) {
             self.zoomScale = zoomScale
             self.onTapNode = onTapNode
+            self.onTapCluster = onTapCluster
+            self.onTapBlank = onTapBlank
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
@@ -567,24 +1028,37 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         }
 
         func handleScrollViewLayout() {
+            isApplyingProgrammaticViewportChange = true
             viewport.handleLayout()
+            isApplyingProgrammaticViewportChange = false
         }
 
         func resetViewport(to scale: CGFloat) {
             isZooming = false
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                zoomScale.wrappedValue = scale
-            }
+            lastReportedZoomScale = scale
+            isApplyingProgrammaticViewportChange = true
             viewport.requestReset(zoomScale: scale)
+            isApplyingProgrammaticViewportChange = false
+        }
+
+        func setZoomScale(_ scale: CGFloat, on scrollView: UIScrollView) {
+            lastReportedZoomScale = scale
+            isApplyingProgrammaticViewportChange = true
+            scrollView.setZoomScale(scale, animated: false)
+            isApplyingProgrammaticViewportChange = false
         }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended,
-                  let scrollView,
-                  let entry = entry(at: recognizer.location(in: scrollView)) else { return }
-            onTapNode(entry.node)
+            guard recognizer.state == .ended, let scrollView else { return }
+            guard let entry = entry(at: recognizer.location(in: scrollView)) else {
+                onTapBlank()
+                return
+            }
+            if entry.clusterCount > 1, !entry.isClusterExpanded {
+                onTapCluster(entry.clusterID)
+            } else {
+                onTapNode(entry)
+            }
         }
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
@@ -598,9 +1072,9 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
 
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             let scale = scrollView.zoomScale
-            if abs(scale - lastReportedZoomScale) > 0.015 {
+            if !isApplyingProgrammaticViewportChange, abs(scale - lastReportedZoomScale) > 0.015 {
                 lastReportedZoomScale = scale
-                zoomScale.wrappedValue = scale
+                reportZoomScale(scale)
             }
             viewport.updateContentInsets()
             canvasView?.applyZoom(scale: scale, mode: .preview)
@@ -609,7 +1083,8 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
             isZooming = false
             let settledScale = scrollView.zoomScale
-            zoomScale.wrappedValue = settledScale
+            reportZoomScale(settledScale)
+            lastReportedZoomScale = settledScale
             viewport.updateContentInsets()
             viewport.clampContentOffset()
             canvasView?.applyZoom(scale: settledScale, mode: .settled, animatesLabel: true)
@@ -625,9 +1100,19 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             viewport.clampContentOffset()
         }
 
+        private func reportZoomScale(_ scale: CGFloat) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    self.zoomScale.wrappedValue = scale
+                }
+            }
+        }
+
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            guard gestureRecognizer is UITapGestureRecognizer, let scrollView else { return true }
-            return entry(at: touch.location(in: scrollView)) != nil
+            gestureRecognizer is UITapGestureRecognizer
         }
 
         private func entry(at scrollViewPoint: CGPoint) -> ComparisonLadderNodeEntry? {
@@ -636,7 +1121,8 @@ private struct ZoomableComparisonLadderView: UIViewRepresentable {
             let counterScale = ComparisonLadderCanvasUIView.nodeCounterScale(for: scrollView.zoomScale)
             let hitSize = CGSize(width: 58 * counterScale, height: 64 * counterScale)
             return nodes.reversed().first { entry in
-                CGRect(
+                guard entry.isClusterExpanded || entry.isClusterRepresentative else { return false }
+                return CGRect(
                     x: entry.position.x - hitSize.width / 2,
                     y: entry.position.y - hitSize.height / 2,
                     width: hitSize.width,
@@ -682,7 +1168,8 @@ private final class ComparisonLadderCanvasUIView: UIView {
         contentSignature: String,
         displayScale: CGFloat
     ) {
-        let shouldAnimate = self.contentSignature != contentSignature
+        let isInitialRender = self.contentSignature.isEmpty
+        let contentDidChange = !isInitialRender && self.contentSignature != contentSignature
         self.contentSignature = contentSignature
         currentScale = displayScale
         comparisonWithoutLayerActions {
@@ -691,11 +1178,11 @@ private final class ComparisonLadderCanvasUIView: UIView {
             connectionContainerLayer.frame = bounds
             nodeContainerLayer.frame = bounds
             rebuildAxis(metrics: metrics)
-            rebuildConnections(metrics: metrics, connections: connections)
-            rebuildNodes(nodes: nodes)
+            rebuildConnections(metrics: metrics, connections: connections, animatesLayout: !isInitialRender && !contentDidChange)
+            rebuildNodes(nodes: nodes, animatesLayout: !isInitialRender && !contentDidChange)
             applyZoom(scale: currentScale, mode: currentMode)
         }
-        if shouldAnimate {
+        if isInitialRender || contentDidChange {
             runEntranceAnimation(connectionCount: connections.count)
         }
     }
@@ -715,16 +1202,23 @@ private final class ComparisonLadderCanvasUIView: UIView {
         }
     }
 
-    func updateSelection(nodeID: String?, pairID: String?) {
+    func updateSelection(nodeID: String?, productKey: String?) {
         comparisonWithoutLayerActions {
             nodeLayers.values.forEach { layer in
-                let isSelected = nodeID == layer.entry.id || pairID == layer.entry.node.matchedPairID
-                let shouldDim = nodeID != nil && !isSelected
+                let isSelected = nodeID == layer.entry.id
+                let isSameProduct = productKey != nil && productKey == layer.entry.node.productKey
+                let shouldDim = productKey != nil && !isSameProduct
                 layer.updateSelection(isSelected: isSelected, isDimmed: shouldDim)
             }
             connectionLayers.forEach { id, layer in
-                let isSelected = pairID == id
-                let shouldDim = pairID != nil && !isSelected
+                let connectedToSelectedNode = nodeID != nil && (
+                    layer.value(forKey: "startNodeID") as? String == nodeID ||
+                    layer.value(forKey: "endNodeID") as? String == nodeID
+                )
+                let layerProductKey = layer.value(forKey: "productKey") as? String
+                let isSameProduct = productKey != nil && productKey == layerProductKey
+                let isSelected = isSameProduct || connectedToSelectedNode
+                let shouldDim = productKey != nil && !isSelected
                 layer.opacity = shouldDim ? 0.12 : (isSelected ? 0.95 : 0.46)
                 layer.lineWidth = isSelected ? 5.1 : (layer.value(forKey: "baseLineWidth") as? CGFloat ?? 2.7)
                 layer.zPosition = isSelected ? 100 : 0
@@ -774,37 +1268,109 @@ private final class ComparisonLadderCanvasUIView: UIView {
         axisLayer.addSublayer(scoreTextLayer)
     }
 
-    private func rebuildConnections(metrics: ComparisonLadderMetrics, connections: [ComparisonLadderConnectionEntry]) {
-        connectionContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        connectionLayers = [:]
+    private func rebuildConnections(metrics: ComparisonLadderMetrics, connections: [ComparisonLadderConnectionEntry], animatesLayout: Bool) {
+        let liveIDs = Set(connections.map(\.id))
+        for (id, layer) in connectionLayers where !liveIDs.contains(id) {
+            layer.removeFromSuperlayer()
+            connectionLayers[id] = nil
+        }
         for connection in connections {
-            let path = UIBezierPath()
-            path.move(to: connection.start)
-            path.addCurve(
-                to: connection.end,
-                controlPoint1: CGPoint(x: metrics.centerX - 78, y: connection.start.y),
-                controlPoint2: CGPoint(x: metrics.centerX + 78, y: connection.end.y)
-            )
-            let layer = shapeLayer(
-                path: path.cgPath,
-                color: connection.color.withAlphaComponent(connection.pair.ratingDelta > 1.5 ? 0.62 : 0.52),
-                lineWidth: connection.lineWidth,
-                dashPattern: connection.pair.ratingDelta > 1.5 ? [8, 7] : nil
-            )
+            let path = connectionPath(connection: connection)
+            let layer: CAShapeLayer
+            if let existing = connectionLayers[connection.id] {
+                layer = existing
+                if animatesLayout {
+                    animate(layer: layer, keyPath: "path", to: path)
+                }
+                layer.path = path
+                layer.strokeColor = connection.color.withAlphaComponent(connectionAlpha(forVariance: connection.ratingVariance, coverage: connection.coverageRatio)).cgColor
+                layer.lineDashPattern = lineDashPattern(forCoverage: connection.coverageRatio)
+            } else {
+                layer = shapeLayer(
+                    path: path,
+                    color: connection.color.withAlphaComponent(connectionAlpha(forVariance: connection.ratingVariance, coverage: connection.coverageRatio)),
+                    lineWidth: connection.lineWidth,
+                    dashPattern: lineDashPattern(forCoverage: connection.coverageRatio)
+                )
+                connectionContainerLayer.addSublayer(layer)
+                connectionLayers[connection.id] = layer
+            }
             layer.opacity = 0.46
+            layer.lineWidth = connection.lineWidth
             layer.setValue(connection.lineWidth, forKey: "baseLineWidth")
-            connectionContainerLayer.addSublayer(layer)
-            connectionLayers[connection.id] = layer
+            layer.setValue(connection.productKey, forKey: "productKey")
+            layer.setValue(connection.startNodeID, forKey: "startNodeID")
+            layer.setValue(connection.endNodeID, forKey: "endNodeID")
         }
     }
 
-    private func rebuildNodes(nodes: [ComparisonLadderNodeEntry]) {
-        nodeContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        nodeLayers = Dictionary(nodes.map { entry in
-            let layer = ComparisonNodeLayer(entry: entry)
-            nodeContainerLayer.addSublayer(layer)
-            return (entry.id, layer)
-        }, uniquingKeysWith: { _, latest in latest })
+    private func connectionAlpha(forVariance variance: Double, coverage: CGFloat) -> CGFloat {
+        let baseAlpha: CGFloat = switch variance {
+        case 1.20...:
+            0.82
+        case 0.35..<1.20:
+            0.76
+        default:
+            0.70
+        }
+        return baseAlpha * (0.78 + min(1, max(0, coverage)) * 0.22)
+    }
+
+    private func lineDashPattern(forCoverage coverage: CGFloat) -> [NSNumber]? {
+        let clamped = min(1, max(0, coverage))
+        guard clamped < 0.999 else { return nil }
+        if clamped >= 0.75 {
+            return [18, 6]
+        }
+        if clamped >= 0.5 {
+            return [10, 8]
+        }
+        return [4, 9]
+    }
+
+    private func rebuildNodes(nodes: [ComparisonLadderNodeEntry], animatesLayout: Bool) {
+        let liveIDs = Set(nodes.map(\.id))
+        for (id, layer) in nodeLayers where !liveIDs.contains(id) {
+            layer.removeFromSuperlayer()
+            nodeLayers[id] = nil
+        }
+        for entry in nodes {
+            if let layer = nodeLayers[entry.id] {
+                layer.updateEntry(entry, animatesLayout: animatesLayout)
+            } else {
+                let layer = ComparisonNodeLayer(entry: entry)
+                nodeContainerLayer.addSublayer(layer)
+                nodeLayers[entry.id] = layer
+            }
+        }
+    }
+
+    private func connectionPath(connection: ComparisonLadderConnectionEntry) -> CGPath {
+        let path = UIBezierPath()
+        path.move(to: connection.start)
+        let horizontalDistance = abs(connection.end.x - connection.start.x)
+        let direction: CGFloat = connection.end.x >= connection.start.x ? 1 : -1
+        let controlDistance = max(76, horizontalDistance * 0.42)
+        path.addCurve(
+            to: connection.end,
+            controlPoint1: CGPoint(x: connection.start.x + direction * controlDistance, y: connection.start.y),
+            controlPoint2: CGPoint(x: connection.end.x - direction * controlDistance, y: connection.end.y)
+        )
+        return path.cgPath
+    }
+
+    private func animate(layer: CALayer, keyPath: String, to value: Any) {
+        guard !UIAccessibility.isReduceMotionEnabled else { return }
+        let animation = CASpringAnimation(keyPath: keyPath)
+        animation.fromValue = layer.presentation()?.value(forKeyPath: keyPath) ?? layer.value(forKeyPath: keyPath)
+        animation.toValue = value
+        animation.mass = 0.55
+        animation.stiffness = 380
+        animation.damping = 34
+        animation.initialVelocity = 0
+        animation.duration = min(0.34, animation.settlingDuration)
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(animation, forKey: "layout.\(keyPath)")
     }
 
     private func shapeLayer(path: CGPath, color: UIColor, lineWidth: CGFloat, dashPattern: [NSNumber]?) -> CAShapeLayer {
@@ -863,12 +1429,12 @@ private final class ComparisonLadderCanvasUIView: UIView {
 }
 
 private final class ComparisonNodeLayer: CALayer {
-    let entry: ComparisonLadderNodeEntry
+    private(set) var entry: ComparisonLadderNodeEntry
     private let badgeLayer = CALayer()
+    private let stackContainerLayer = CALayer()
     private let badgeCircleLayer = CAShapeLayer()
+    private let dotContainerLayer = CALayer()
     private let stickerLayer = CALayer()
-    private let ratingBadgeLayer = CALayer()
-    private let ratingTextLayer = CATextLayer()
     private let labelContainerLayer = CALayer()
     private let nameTextLayer = CATextLayer()
     private let brandTextLayer = CATextLayer()
@@ -902,11 +1468,44 @@ private final class ComparisonNodeLayer: CALayer {
         nil
     }
 
+    func updateEntry(_ entry: ComparisonLadderNodeEntry, animatesLayout: Bool) {
+        let oldPosition = presentation()?.position ?? position
+        let wasRenderable = self.entry.isClusterExpanded || self.entry.isClusterRepresentative
+        self.entry = entry
+        let isRenderable = entry.isClusterExpanded || entry.isClusterRepresentative
+        accessibilityLabel = entry.accessibilityLabel
+        updateVisualContent()
+        if animatesLayout {
+            let animation = CASpringAnimation(keyPath: "position")
+            animation.fromValue = oldPosition
+            animation.toValue = entry.position
+            animation.mass = 0.55
+            animation.stiffness = 380
+            animation.damping = 34
+            animation.duration = min(0.34, animation.settlingDuration)
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            add(animation, forKey: "layout.position")
+
+            if wasRenderable != isRenderable {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = presentation()?.opacity ?? (wasRenderable ? 1 : 0)
+                fade.toValue = isRenderable ? 1 : 0
+                fade.duration = isRenderable ? 0.11 : 0.08
+                fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                add(fade, forKey: "layout.opacity")
+            }
+        }
+        position = entry.position
+    }
+
     func apply(counterScale: CGFloat, labelOpacity: CGFloat, animatesLabel: Bool) {
         position = entry.position
         transform = CATransform3DMakeScale(counterScale, counterScale, 1)
         zPosition = 10_000 - entry.position.y
-        let renderedOpacity = Float(labelOpacity > 0 ? max(0.003, labelOpacity) : 0)
+        let isRenderable = entry.isClusterExpanded || entry.isClusterRepresentative
+        opacity = isRenderable ? 1 : 0
+        let canShowLabel = entry.isClusterExpanded || entry.clusterCount == 1
+        let renderedOpacity = Float(canShowLabel && labelOpacity > 0 ? max(0.003, labelOpacity) : 0)
         if animatesLabel, labelContainerLayer.opacity != renderedOpacity {
             let animation = CABasicAnimation(keyPath: "opacity")
             animation.fromValue = labelContainerLayer.presentation()?.opacity ?? labelContainerLayer.opacity
@@ -921,9 +1520,10 @@ private final class ComparisonNodeLayer: CALayer {
     }
 
     func updateSelection(isSelected: Bool, isDimmed: Bool) {
-        opacity = isDimmed ? 0.38 : 1
-        badgeCircleLayer.lineWidth = isSelected ? 2.4 : 1
-        badgeCircleLayer.strokeColor = UIColor.black.withAlphaComponent(isSelected ? 0.72 : 0.12).cgColor
+        let isRenderable = entry.isClusterExpanded || entry.isClusterRepresentative
+        opacity = !isRenderable ? 0 : (isDimmed ? 0.38 : 1)
+        badgeCircleLayer.lineWidth = isSelected ? 2.4 : 1.15
+        badgeCircleLayer.strokeColor = (isSelected ? nodeColor.blended(with: .black, amount: 0.2) : badgeStrokeColor).cgColor
         zPosition = isSelected ? 20_000 : 10_000 - entry.position.y
         shadowColor = UIColor.black.cgColor
         shadowOpacity = isSelected ? 0.2 : 0
@@ -933,17 +1533,18 @@ private final class ComparisonNodeLayer: CALayer {
 
     private func setupBadge() {
         badgeLayer.frame = CGRect(x: (bounds.width - badgeSize) / 2, y: 0, width: badgeSize, height: badgeSize)
+        stackContainerLayer.frame = badgeLayer.bounds
+        badgeLayer.addSublayer(stackContainerLayer)
         badgeCircleLayer.frame = badgeLayer.bounds
         badgeCircleLayer.path = UIBezierPath(ovalIn: badgeLayer.bounds).cgPath
         badgeCircleLayer.fillColor = UIColor.white.withAlphaComponent(0.96).cgColor
-        badgeCircleLayer.strokeColor = UIColor.black.withAlphaComponent(0.12).cgColor
-        badgeCircleLayer.lineWidth = 1
+        badgeCircleLayer.strokeColor = badgeStrokeColor.cgColor
+        badgeCircleLayer.lineWidth = 1.15
         badgeCircleLayer.shadowColor = UIColor.black.cgColor
         badgeCircleLayer.shadowOpacity = 0.13
         badgeCircleLayer.shadowRadius = 8
         badgeCircleLayer.shadowOffset = CGSize(width: 0, height: 4)
         badgeLayer.addSublayer(badgeCircleLayer)
-
         stickerLayer.frame = badgeLayer.bounds.insetBy(dx: 5, dy: 5)
         stickerLayer.contentsGravity = .resizeAspect
         stickerLayer.contentsScale = UIScreen.main.scale
@@ -951,19 +1552,75 @@ private final class ComparisonNodeLayer: CALayer {
         stickerLayer.magnificationFilter = .linear
         stickerLayer.contents = stickerContents()
         badgeLayer.addSublayer(stickerLayer)
+        dotContainerLayer.frame = badgeLayer.bounds
+        badgeLayer.addSublayer(dotContainerLayer)
+        renderStack()
+    }
 
-        let rating = String(format: "%.2f", entry.node.aggregateRating)
-        let ratingFont = UIFont.monospacedDigitSystemFont(ofSize: 6.8, weight: .bold)
-        let ratingWidth = max(23, rating.size(withAttributes: [.font: ratingFont]).width + 6)
-        ratingBadgeLayer.frame = CGRect(x: badgeLayer.bounds.maxX - ratingWidth + 5, y: badgeLayer.bounds.maxY - 9, width: ratingWidth, height: 12)
-        ratingBadgeLayer.backgroundColor = UIColor.black.withAlphaComponent(0.78).cgColor
-        ratingBadgeLayer.cornerRadius = 6
-        ratingBadgeLayer.masksToBounds = true
-        badgeLayer.addSublayer(ratingBadgeLayer)
+    private func updateVisualContent() {
+        sideTextLayer.string = entry.ownerName
+        nameTextLayer.string = entry.node.displayName
+        brandTextLayer.string = entry.node.displayBrand
+        stickerLayer.contents = stickerContents()
+        badgeCircleLayer.strokeColor = badgeStrokeColor.cgColor
+        renderStack()
+    }
 
-        ratingTextLayer.frame = CGRect(x: 3, y: 1.5, width: ratingWidth - 6, height: 9)
-        configureTextLayer(ratingTextLayer, text: rating, font: ratingFont, color: .white, alignment: .center)
-        ratingBadgeLayer.addSublayer(ratingTextLayer)
+    private func renderStack() {
+        stackContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        dotContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
+        guard entry.clusterCount > 1, !entry.isClusterExpanded else { return }
+
+        let visibleBackplates = min(entry.clusterCount - 1, 2)
+        for index in 0..<visibleBackplates {
+            let progress = CGFloat(index + 1)
+            let scale = 1 - progress * 0.10
+            let offsetX = (index == 0 ? -7 : 7)
+            let offsetY = CGFloat(visibleBackplates - index) * 4.5
+            let inset = badgeSize * (1 - scale) / 2
+            let plate = CAShapeLayer()
+            plate.frame = badgeLayer.bounds
+                .insetBy(dx: inset, dy: inset)
+                .offsetBy(dx: CGFloat(offsetX), dy: offsetY)
+            plate.path = UIBezierPath(ovalIn: plate.bounds).cgPath
+            plate.fillColor = UIColor.white.withAlphaComponent(0.94 - CGFloat(index) * 0.08).cgColor
+            plate.strokeColor = UIColor.black.withAlphaComponent(0.12).cgColor
+            plate.lineWidth = 1
+            plate.shadowColor = UIColor.black.cgColor
+            plate.shadowOpacity = 0.075
+            plate.shadowRadius = 4
+            plate.shadowOffset = CGSize(width: 0, height: 2)
+            stackContainerLayer.addSublayer(plate)
+
+            let accentDot = CAShapeLayer()
+            accentDot.frame = CGRect(
+                x: plate.bounds.midX - 3,
+                y: plate.bounds.midY - 3,
+                width: 6,
+                height: 6
+            )
+            accentDot.path = UIBezierPath(ovalIn: accentDot.bounds).cgPath
+            accentDot.fillColor = nodeColor.withAlphaComponent(0.38 - CGFloat(index) * 0.08).cgColor
+            plate.addSublayer(accentDot)
+        }
+
+        let countBadge = CALayer()
+        countBadge.frame = CGRect(x: badgeLayer.bounds.maxX - 14, y: badgeLayer.bounds.maxY - 13, width: 17, height: 17)
+        countBadge.backgroundColor = nodeColor.withAlphaComponent(0.94).cgColor
+        countBadge.cornerRadius = 8.5
+        countBadge.masksToBounds = true
+        dotContainerLayer.addSublayer(countBadge)
+
+        let countText = CATextLayer()
+        countText.frame = CGRect(x: 0, y: 2.1, width: 17, height: 12)
+        configureTextLayer(
+            countText,
+            text: "\(entry.clusterCount)",
+            font: .systemFont(ofSize: 8.2, weight: .black),
+            color: .white,
+            alignment: .center
+        )
+        countBadge.addSublayer(countText)
     }
 
     private func setupLabel() {
@@ -1010,23 +1667,188 @@ private final class ComparisonNodeLayer: CALayer {
             image.draw(in: CGRect(origin: .zero, size: stickerLayer.bounds.size))
         }.cgImage
     }
+
+    private var nodeColor: UIColor {
+        ComparisonOwnerPalette.uiColor(index: entry.ownerIndex)
+    }
+
+    private var badgeStrokeColor: UIColor {
+        UIColor.black.withAlphaComponent(0.18)
+    }
+}
+
+private struct ComparisonOverlayRow: Identifiable {
+    let id: String
+    let ownerName: String
+    let node: ComparisonDrinkNode?
+    let accent: Color
+    let isFocused: Bool
+}
+
+struct PixelPartyMember: Identifiable, Hashable {
+    let id: String
+    let name: String
+    let pixelPerson: PixelPersonProfile
+    var isFocused: Bool = false
+}
+
+struct PixelPartyLineView: View {
+    let members: [PixelPartyMember]
+    var maxVisible: Int = 10
+
+    private var visibleMembers: [PixelPartyMember] {
+        Array(members.prefix(maxVisible))
+    }
+
+    private var remainingCount: Int {
+        max(0, members.count - visibleMembers.count)
+    }
+
+    var body: some View {
+        HStack(spacing: -5) {
+            ForEach(visibleMembers) { member in
+                PixelTinyPersonView(profile: member.pixelPerson, isFocused: member.isFocused)
+                    .frame(width: 34, height: 42)
+                    .accessibilityLabel("\(member.name) 的像素小小人")
+            }
+
+            if remainingCount > 0 {
+                Text("+\(remainingCount)")
+                    .font(.system(size: 10, weight: .black, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 7)
+                    .frame(height: 24)
+                    .background(Color.white.opacity(0.92))
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(.black.opacity(0.12), lineWidth: 1)
+                    )
+                    .padding(.leading, 4)
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+struct PixelTinyPersonView: View {
+    let profile: PixelPersonProfile
+    var isFocused = false
+
+    var body: some View {
+        Canvas { context, size in
+            let unit = max(1, floor(min(size.width / 16, size.height / 22)))
+            let origin = CGPoint(
+                x: floor((size.width - unit * 16) / 2),
+                y: floor((size.height - unit * 22) / 2)
+            )
+
+            func rect(_ x: Int, _ y: Int, _ width: Int, _ height: Int, _ color: Color) {
+                let frame = CGRect(
+                    x: origin.x + CGFloat(x) * unit,
+                    y: origin.y + CGFloat(y) * unit,
+                    width: CGFloat(width) * unit,
+                    height: CGFloat(height) * unit
+                )
+                context.fill(Path(frame), with: .color(color))
+            }
+
+            let skin = Color(pixelHex: profile.skinHex)
+            let hair = Color(pixelHex: profile.hairHex)
+            let top = Color(pixelHex: profile.topHex)
+            let bottom = Color(pixelHex: profile.bottomHex)
+            let accent = Color(pixelHex: profile.accentHex)
+            let outline = Color.black.opacity(0.72)
+            let cheek = Color.red.opacity(0.36)
+
+            rect(0, 11, 4, 2, skin)
+            rect(12, 11, 4, 2, skin)
+            rect(2, 12, 2, 1, skin)
+            rect(12, 12, 2, 1, skin)
+
+            rect(5, 13, 6, 5, bottom)
+            rect(6, 12, 4, 2, top)
+            rect(5, 10, 6, 4, top)
+            rect(7, 9, 2, 2, accent)
+
+            rect(5, 18, 2, 3, bottom)
+            rect(9, 18, 2, 3, bottom)
+            rect(4, 21, 3, 1, outline)
+            rect(9, 21, 3, 1, outline)
+
+            rect(5, 4, 6, 6, skin)
+            rect(5, 3, 6, 2, hair)
+            switch profile.hairStyle {
+            case 0:
+                rect(4, 4, 2, 3, hair)
+                rect(10, 4, 1, 2, hair)
+            case 1:
+                rect(4, 4, 7, 2, hair)
+                rect(5, 6, 1, 1, hair)
+            case 2:
+                rect(5, 2, 5, 2, hair)
+                rect(4, 4, 1, 2, hair)
+                rect(10, 4, 1, 3, hair)
+            default:
+                rect(4, 3, 3, 3, hair)
+                rect(8, 3, 3, 2, hair)
+            }
+
+            rect(6, 6, 1, 1, outline)
+            rect(9, 6, 1, 1, outline)
+            switch profile.faceStyle {
+            case 0:
+                rect(7, 8, 2, 1, outline)
+            case 1:
+                rect(7, 8, 1, 1, outline)
+                rect(9, 8, 1, 1, outline)
+            default:
+                rect(7, 8, 2, 1, cheek)
+            }
+
+            switch profile.accessoryStyle {
+            case 0:
+                rect(11, 6, 2, 1, accent)
+                rect(12, 7, 1, 2, accent)
+            case 1:
+                rect(4, 6, 1, 1, accent)
+                rect(11, 6, 1, 1, accent)
+            case 2:
+                rect(7, 2, 2, 1, accent)
+            default:
+                rect(11, 10, 2, 3, accent)
+                rect(12, 9, 1, 1, Color.white.opacity(0.88))
+            }
+
+            if isFocused {
+                rect(3, 1, 10, 1, accent)
+                rect(2, 2, 1, 2, accent)
+                rect(13, 2, 1, 2, accent)
+            }
+        }
+        .drawingGroup(opaque: false, colorMode: .nonLinear)
+    }
+}
+
+private extension Color {
+    init(pixelHex hex: String) {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#").union(.whitespacesAndNewlines))
+        var value: UInt64 = 0
+        Scanner(string: cleaned).scanHexInt64(&value)
+        let red = Double((value >> 16) & 0xFF) / 255
+        let green = Double((value >> 8) & 0xFF) / 255
+        let blue = Double(value & 0xFF) / 255
+        self.init(red: red, green: green, blue: blue)
+    }
 }
 
 private struct ComparisonDrinkCardOverlay: View {
-    let node: ComparisonDrinkNode
-    let pair: ComparisonDrinkPair?
-    let localOwnerName: String
-    let peerOwnerName: String
+    let selectedEntry: ComparisonLadderNodeEntry
+    let rows: [ComparisonOverlayRow]
     let onClose: () -> Void
 
-    private var localNode: ComparisonDrinkNode? {
-        if let pair { return pair.local }
-        return node.side == .local ? node : nil
-    }
-
-    private var peerNode: ComparisonDrinkNode? {
-        if let pair { return pair.peer }
-        return node.side == .peer ? node : nil
+    private var selectedNode: ComparisonDrinkNode {
+        selectedEntry.node
     }
 
     var body: some View {
@@ -1041,7 +1863,7 @@ private struct ComparisonDrinkCardOverlay: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .top, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(pair?.local.displayName ?? node.displayName)
+                            Text(selectedNode.displayName)
                                 .font(.title3.weight(.black))
                                 .lineLimit(1)
                             Text(summaryText)
@@ -1060,8 +1882,14 @@ private struct ComparisonDrinkCardOverlay: View {
                         .buttonStyle(.plain)
                     }
 
-                    ComparisonStackCard(ownerName: localOwnerName, node: localNode, accent: .black)
-                    ComparisonStackCard(ownerName: peerOwnerName, node: peerNode, accent: .blue)
+                    ForEach(rows) { row in
+                        ComparisonStackCard(
+                            ownerName: row.ownerName,
+                            node: row.node,
+                            accent: row.accent,
+                            isFocused: row.isFocused
+                        )
+                    }
                 }
                 .padding(16)
                 .frame(width: width)
@@ -1079,10 +1907,9 @@ private struct ComparisonDrinkCardOverlay: View {
     }
 
     private var summaryText: String {
-        if let pair {
-            return "共同喝过 · 评分差 \(String(format: "%.2f", pair.ratingDelta))"
-        }
-        return node.side == .local ? "只在我的图鉴里记录" : "只在 \(peerOwnerName) 的图鉴里记录"
+        let recordedNodes = rows.compactMap(\.node)
+        guard recordedNodes.count >= 2 else { return "\(selectedEntry.ownerName) 记录过" }
+        return "\(recordedNodes.count) 人记录"
     }
 }
 
@@ -1090,6 +1917,7 @@ private struct ComparisonStackCard: View {
     let ownerName: String
     let node: ComparisonDrinkNode?
     let accent: Color
+    let isFocused: Bool
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1144,7 +1972,7 @@ private struct ComparisonStackCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(.black.opacity(0.06), lineWidth: 1)
+                .stroke(isFocused ? accent.opacity(0.76) : .black.opacity(0.06), lineWidth: isFocused ? 1.6 : 1)
         )
     }
 

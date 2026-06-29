@@ -760,6 +760,11 @@ struct CollectionView: View {
         ladderCenterResetToken += 1
     }
 
+    private func openComparison() {
+        guard let compendium = sharedStore.compendiums.randomElement() else { return }
+        openComparison(compendium)
+    }
+
     private func openComparison(_ compendium: SharedCompendium) {
         selectedItem = nil
         draggingItem = nil
@@ -905,6 +910,16 @@ struct CollectionView: View {
 
         do {
             let compendium = try await sharedStore.importArchive(at: url)
+            let profile = TasteScoreCalculator.profile(from: compendium)
+            tasteStatsStore.recordSuccessfulExchange(
+                ownerID: compendium.ownerID,
+                ownerName: compendium.ownerName,
+                drinkCount: TasteScoreCalculator.totalActualCupCount(profile: profile),
+                effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
+                averageRating: TasteScoreCalculator.averageRating(profile: profile),
+                profile: profile,
+                pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium)
+            )
             await MainActor.run {
                 temporaryCrossOwnerImportMessage = "已导入为共享图鉴：\(compendium.ownerName)。"
             }
@@ -1378,7 +1393,7 @@ private struct LadderTopDock: View {
     let isExporting: Bool
     let isImporting: Bool
     let onSwitchCompendium: (String) -> Void
-    let onCompareCompendium: (SharedCompendium) -> Void
+    let onCompareCompendium: () -> Void
     let onOpenProfile: () -> Void
     let onExport: () -> Void
     let onImport: () -> Void
@@ -1518,27 +1533,12 @@ private struct LadderTopDock: View {
 
     @ViewBuilder
     private var compareMenu: some View {
-        if sharedCompendiums.count == 1, let compendium = sharedCompendiums.first {
-            Button {
-                onCompareCompendium(compendium)
-            } label: {
-                compareChip
-            }
-            .buttonStyle(LeverControlButtonStyle())
-        } else {
-            Menu {
-                ForEach(sharedCompendiums) { compendium in
-                    Button {
-                        onCompareCompendium(compendium)
-                    } label: {
-                        Label(compendium.ownerName, systemImage: "person.2")
-                    }
-                }
-            } label: {
-                compareChip
-            }
-            .buttonStyle(LeverControlButtonStyle())
+        Button {
+            onCompareCompendium()
+        } label: {
+            compareChip
         }
+        .buttonStyle(LeverControlButtonStyle())
     }
 
     private var compareChip: some View {
