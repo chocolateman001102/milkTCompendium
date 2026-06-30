@@ -788,7 +788,12 @@ private enum ComparisonOwnerPalette {
     private static let uiColors = [
         UIColor(red: 0.70, green: 0.48, blue: 0.30, alpha: 1),
         UIColor(red: 0.38, green: 0.48, blue: 0.76, alpha: 1),
-        UIColor(red: 0.24, green: 0.50, blue: 0.38, alpha: 1)
+        UIColor(red: 0.24, green: 0.50, blue: 0.38, alpha: 1),
+        UIColor(red: 0.74, green: 0.35, blue: 0.43, alpha: 1),
+        UIColor(red: 0.20, green: 0.55, blue: 0.62, alpha: 1),
+        UIColor(red: 0.55, green: 0.42, blue: 0.72, alpha: 1),
+        UIColor(red: 0.64, green: 0.43, blue: 0.18, alpha: 1),
+        UIColor(red: 0.46, green: 0.50, blue: 0.22, alpha: 1)
     ]
 
     static func uiColor(index: Int) -> UIColor {
@@ -1996,52 +2001,12 @@ private struct ComparisonStackCard: View {
     let isFocused: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            sticker
-                .frame(width: 72, height: 86)
-
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 7) {
-                    Text(ownerName)
-                        .font(.caption.weight(.black))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .foregroundStyle(node == nil ? Color.secondary : Color.white)
-                        .background(node == nil ? Color(.secondarySystemGroupedBackground) : accent)
-                        .clipShape(Capsule())
-                    Spacer()
-                    if let node {
-                        Text(String(format: "%.2f", node.aggregateRating))
-                            .font(.headline.weight(.black).monospacedDigit())
-                    }
-                }
-
-                if let node {
-                    Text(node.displayBrand)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Text(node.displayName)
-                        .font(.subheadline.weight(.bold))
-                        .lineLimit(2)
-                    HStack(spacing: 7) {
-                        infoPill("甜度", node.representative.sweetness)
-                        infoPill("冰度", node.representative.iceLevel)
-                        infoPill("杯数", "\(node.totalCupCount)")
-                    }
-                    Text(displayNote(for: node))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                } else {
-                    Text("未记录这杯")
-                        .font(.subheadline.weight(.bold))
-                    Text("这本图鉴里暂时没有对应饮品。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        Group {
+            if let node {
+                recordedCard(for: node)
+            } else {
+                missingCard
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(12)
         .background(Color(.secondarySystemGroupedBackground).opacity(0.72))
@@ -2050,6 +2015,67 @@ private struct ComparisonStackCard: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .stroke(isFocused ? accent.opacity(0.76) : .black.opacity(0.06), lineWidth: isFocused ? 1.6 : 1)
         )
+    }
+
+    private func recordedCard(for node: ComparisonDrinkNode) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                sticker
+                    .frame(width: 72, height: 82)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        Text(ownerName)
+                            .font(.caption.weight(.black))
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .foregroundStyle(Color.white)
+                            .background(accent)
+                            .clipShape(Capsule())
+                        Spacer()
+                        Text(String(format: "%.2f", node.aggregateRating))
+                            .font(.headline.weight(.black).monospacedDigit())
+                            .lineLimit(1)
+                    }
+
+                    Text(node.displayBrand)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(node.displayName)
+                        .font(.subheadline.weight(.bold))
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
+            }
+
+            bottomInfo(for: node)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var missingCard: some View {
+        HStack(alignment: .center, spacing: 12) {
+            sticker
+                .frame(width: 72, height: 72)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(ownerName)
+                    .font(.caption.weight(.black))
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+                Text("未记录这杯")
+                    .font(.subheadline.weight(.bold))
+                    .lineLimit(1)
+                Text("这本图鉴里暂时没有对应饮品。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minHeight: 72, alignment: .center)
     }
 
     @ViewBuilder
@@ -2070,8 +2096,35 @@ private struct ComparisonStackCard: View {
         }
     }
 
-    private func infoPill(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
+    private func bottomInfo(for node: ComparisonDrinkNode) -> some View {
+        let edgeInset: CGFloat = 13
+        let textInset: CGFloat = 7
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                infoPill("甜度", node.representative.sweetness, textAlignment: .leading, frameAlignment: .leading)
+                infoPill("冰度", node.representative.iceLevel, textAlignment: .leading, frameAlignment: .center)
+                infoPill("杯数", "\(node.totalCupCount)", textAlignment: .leading, frameAlignment: .trailing)
+            }
+            .padding(.horizontal, edgeInset)
+
+            Text(displayNote(for: node))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.leading, edgeInset + textInset)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 68, alignment: .top)
+    }
+
+    private func infoPill(
+        _ title: String,
+        _ value: String,
+        textAlignment: HorizontalAlignment = .leading,
+        frameAlignment: Alignment = .leading
+    ) -> some View {
+        VStack(alignment: textAlignment, spacing: 1) {
             Text(title)
                 .font(.system(size: 8, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -2079,11 +2132,11 @@ private struct ComparisonStackCard: View {
                 .font(.caption2.weight(.bold))
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 7)
         .padding(.vertical, 5)
         .background(.white.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: frameAlignment)
     }
 
     private func displayNote(for node: ComparisonDrinkNode) -> String {

@@ -21,7 +21,6 @@ final class DataMigrationManager {
             try FileManager.default.removeItem(at: outputURL)
         }
         try data.write(to: outputURL, options: .atomic)
-、
         return outputURL
     }
 

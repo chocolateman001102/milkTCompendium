@@ -128,7 +128,7 @@ private extension UIImage {
                 let red = pixels[pixelIndex]
                 let green = pixels[pixelIndex + 1]
                 let blue = pixels[pixelIndex + 2]
-                let inHandZone = x < width * 34 / 100 || x > width * 66 / 100 || y > height * 42 / 100
+                let inHandZone = x < width * 26 / 100 || x > width * 74 / 100 || y > height * 62 / 100
                 if inHandZone, Self.looksLikeSkin(red: red, green: green, blue: blue) {
                     candidate[y * width + x] = true
                 }
@@ -146,6 +146,9 @@ private extension UIImage {
             var touchesEdge = false
             var sidePixels = 0
             var lowerPixels = 0
+            var centralCorePixels = 0
+            var exposedPixels = 0
+            var edgeEntryPixels = 0
             var minX = width
             var maxX = 0
             var minY = height
@@ -163,8 +166,17 @@ private extension UIImage {
                 if x < width * 28 / 100 || x > width * 72 / 100 {
                     sidePixels += 1
                 }
-                if y > height * 48 / 100 {
+                if y > height * 60 / 100 {
                     lowerPixels += 1
+                }
+                if x > width * 32 / 100, x < width * 68 / 100, y < height * 82 / 100 {
+                    centralCorePixels += 1
+                }
+                if Self.hasTransparentNeighbor(around: current, width: width, height: height, pixels: pixels, bytesPerPixel: bytesPerPixel, bytesPerRow: bytesPerRow) {
+                    exposedPixels += 1
+                    if x < width * 12 / 100 || x > width * 88 / 100 || y > height * 88 / 100 {
+                        edgeEntryPixels += 1
+                    }
                 }
 
                 let neighbors = [
@@ -183,24 +195,33 @@ private extension UIImage {
             let size = component.count
             let sideRatio = CGFloat(sidePixels) / CGFloat(max(size, 1))
             let lowerRatio = CGFloat(lowerPixels) / CGFloat(max(size, 1))
+            let centralCoreRatio = CGFloat(centralCorePixels) / CGFloat(max(size, 1))
+            let exposedRatio = CGFloat(exposedPixels) / CGFloat(max(size, 1))
+            let edgeEntryRatio = CGFloat(edgeEntryPixels) / CGFloat(max(size, 1))
             let componentRatio = CGFloat(size) / CGFloat(max(alphaPixelCount, 1))
             let componentWidthRatio = CGFloat(maxX - minX + 1) / CGFloat(width)
             let componentHeightRatio = CGFloat(maxY - minY + 1) / CGFloat(height)
-            let shouldRemove = size >= minimumComponentSize && (
-                componentRatio < 0.36 &&
-                    componentWidthRatio < 0.62 &&
-                    componentHeightRatio < 0.74
-            ) && (
-                touchesEdge && (sideRatio > 0.34 || lowerRatio > 0.34) ||
-                    sideRatio > 0.58 && lowerRatio > 0.28
-            )
+            let entersFromOuterEdge = touchesEdge || edgeEntryRatio > 0.08
+            let staysOutsideDrinkCore = centralCoreRatio < 0.34
+            let hasHandScale = componentRatio > 0.006 &&
+                componentRatio < 0.22 &&
+                componentWidthRatio < 0.56 &&
+                componentHeightRatio < 0.62
+            let hasExposedSilhouette = exposedRatio > 0.18 && edgeEntryRatio > 0.025
+            let hasHandPlacement = sideRatio > 0.52 || lowerRatio > 0.58 || (sideRatio > 0.36 && lowerRatio > 0.36)
+            let shouldRemove = size >= minimumComponentSize &&
+                hasHandScale &&
+                entersFromOuterEdge &&
+                hasExposedSilhouette &&
+                staysOutsideDrinkCore &&
+                hasHandPlacement
             guard shouldRemove else { continue }
 
             for index in component {
                 let x = index % width
                 let y = index / width
-                for dy in -2...2 {
-                    for dx in -2...2 {
+                for dy in -1...1 {
+                    for dx in -1...1 {
                         let nextX = x + dx
                         let nextY = y + dy
                         guard nextX >= 0, nextY >= 0, nextX < width, nextY < height else { continue }
@@ -364,6 +385,34 @@ private extension UIImage {
             r > b + 18 &&
             maxChannel - minChannel > 22 &&
             abs(r - g) < 96
+    }
+
+    private static func hasTransparentNeighbor(
+        around index: Int,
+        width: Int,
+        height: Int,
+        pixels: [UInt8],
+        bytesPerPixel: Int,
+        bytesPerRow: Int
+    ) -> Bool {
+        let x = index % width
+        let y = index / width
+
+        for dy in -2...2 {
+            for dx in -2...2 where dx != 0 || dy != 0 {
+                let nextX = x + dx
+                let nextY = y + dy
+                guard nextX >= 0, nextY >= 0, nextX < width, nextY < height else {
+                    return true
+                }
+                let alpha = pixels[nextY * bytesPerRow + nextX * bytesPerPixel + 3]
+                if alpha <= 40 {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     private var uprightDrinkMetrics: (score: CGFloat, mouthScore: CGFloat, verticalScore: CGFloat) {
