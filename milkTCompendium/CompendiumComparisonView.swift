@@ -628,31 +628,36 @@ struct CompendiumComparisonView: View {
         let entriesByOwner = Dictionary(grouping: nodeEntries, by: \.ownerID)
         let varianceByProduct = productRatingVarianceByKey(from: nodeEntries)
         let coverageByProduct = productCoverageByKey(from: nodeEntries, ownerCount: owners.count)
+        let productKeys = Set(nodeEntries.map(\.node.productKey))
         var connections: [ComparisonLadderConnectionEntry] = []
-        for leftIndex in owners.indices {
-            for rightIndex in owners.indices where rightIndex > leftIndex {
-                let leftOwner = owners[leftIndex]
-                let rightOwner = owners[rightIndex]
-                let leftByProduct = Dictionary(uniqueKeysWithValues: (entriesByOwner[leftOwner.id] ?? []).map { ($0.node.productKey, $0) })
-                let rightByProduct = Dictionary(uniqueKeysWithValues: (entriesByOwner[rightOwner.id] ?? []).map { ($0.node.productKey, $0) })
-                for productKey in Set(leftByProduct.keys).intersection(rightByProduct.keys).sorted() {
-                    guard let start = leftByProduct[productKey], let end = rightByProduct[productKey] else { continue }
-                    let variance = varianceByProduct[productKey] ?? 0
-                    let coverage = coverageByProduct[productKey] ?? 1
-                    let id = "connection-\(leftOwner.id)-\(rightOwner.id)-\(productKey)"
-                    connections.append(ComparisonLadderConnectionEntry(
-                        id: id,
-                        productKey: productKey,
-                        startNodeID: start.id,
-                        endNodeID: end.id,
-                        ratingVariance: variance,
-                        coverageRatio: coverage,
-                        start: start.position,
-                        end: end.position,
-                        color: connectionUIColor(forVariance: variance),
-                        lineWidth: connectionLineWidth(forVariance: variance)
-                    ))
+
+        for productKey in productKeys.sorted() {
+            let participants = owners.compactMap { owner -> (owner: ComparisonOwnerColumn, entry: ComparisonLadderNodeEntry)? in
+                guard let entry = entriesByOwner[owner.id]?.first(where: { $0.node.productKey == productKey }) else {
+                    return nil
                 }
+                return (owner, entry)
+            }
+            guard participants.count >= 2 else { continue }
+            let variance = varianceByProduct[productKey] ?? 0
+            let coverage = coverageByProduct[productKey] ?? 1
+
+            for index in participants.indices.dropLast() {
+                let start = participants[index]
+                let end = participants[participants.index(after: index)]
+                let id = "connection-\(start.owner.id)-\(end.owner.id)-\(productKey)"
+                connections.append(ComparisonLadderConnectionEntry(
+                    id: id,
+                    productKey: productKey,
+                    startNodeID: start.entry.id,
+                    endNodeID: end.entry.id,
+                    ratingVariance: variance,
+                    coverageRatio: coverage,
+                    start: start.entry.position,
+                    end: end.entry.position,
+                    color: connectionUIColor(forVariance: variance),
+                    lineWidth: connectionLineWidth(forVariance: variance)
+                ))
             }
         }
         return connections
@@ -687,22 +692,22 @@ struct CompendiumComparisonView: View {
     private func connectionUIColor(forVariance variance: Double) -> UIColor {
         switch variance {
         case 1.20...:
-            return UIColor(red: 0.93, green: 0.18, blue: 0.16, alpha: 1)
+            return UIColor(red: 0.86, green: 0.12, blue: 0.19, alpha: 1)
         case 0.35..<1.20:
-            return UIColor(red: 0.88, green: 0.68, blue: 0.18, alpha: 1)
+            return UIColor(red: 0.91, green: 0.62, blue: 0.06, alpha: 1)
         default:
-            return UIColor(red: 0.05, green: 0.62, blue: 0.28, alpha: 1)
+            return UIColor(red: 0.10, green: 0.57, blue: 0.31, alpha: 1)
         }
     }
 
     private func connectionLineWidth(forVariance variance: Double) -> CGFloat {
         switch variance {
         case 1.20...:
-            return 3.9
+            return 4.35
         case 0.35..<1.20:
-            return 3.35
+            return 3.95
         default:
-            return 3.0
+            return 3.55
         }
     }
 
@@ -898,6 +903,21 @@ private struct ComparisonLadderConnectionEntry {
     let end: CGPoint
     let color: UIColor
     let lineWidth: CGFloat
+}
+
+private struct ConnectionRenderGeometry {
+    let path: CGPath
+}
+
+private struct ConnectionObstacle {
+    let center: CGPoint
+    let radius: CGFloat
+}
+
+private struct ConnectionRouteCandidate {
+    let controlPoint1: CGPoint
+    let controlPoint2: CGPoint
+    let curvaturePenalty: CGFloat
 }
 
 private struct ZoomableComparisonLadderView: UIViewRepresentable {
@@ -1189,6 +1209,8 @@ private final class ComparisonLadderCanvasUIView: UIView {
     private let nodeContainerLayer = CALayer()
     private var nodeLayers: [String: ComparisonNodeLayer] = [:]
     private var connectionLayers: [String: CAShapeLayer] = [:]
+    private var currentConnections: [ComparisonLadderConnectionEntry] = []
+    private var currentNodeEntries: [ComparisonLadderNodeEntry] = []
     private var currentScale: CGFloat = 0.48
     private var currentMode = LabelMode.settled
     private var contentSignature = ""
@@ -1216,6 +1238,7 @@ private final class ComparisonLadderCanvasUIView: UIView {
         let isInitialRender = self.contentSignature.isEmpty
         let contentDidChange = !isInitialRender && self.contentSignature != contentSignature
         self.contentSignature = contentSignature
+        currentNodeEntries = nodes
         currentScale = displayScale
         comparisonWithoutLayerActions {
             bounds = CGRect(origin: .zero, size: contentSize)
@@ -1244,6 +1267,7 @@ private final class ComparisonLadderCanvasUIView: UIView {
         }
         comparisonWithoutLayerActions {
             nodeLayers.values.forEach { $0.apply(counterScale: counterScale, labelOpacity: labelOpacity, animatesLabel: animatesLabel) }
+            updateConnectionGeometry(animatesLayout: mode == .settled && animatesLabel)
         }
     }
 
@@ -1264,7 +1288,7 @@ private final class ComparisonLadderCanvasUIView: UIView {
                 let isSameProduct = productKey != nil && productKey == layerProductKey
                 let isSelected = isSameProduct || connectedToSelectedNode
                 let shouldDim = productKey != nil && !isSelected
-                layer.opacity = shouldDim ? 0.12 : (isSelected ? 0.95 : 0.46)
+                layer.opacity = shouldDim ? 0.12 : (isSelected ? 1 : 0.58)
                 layer.lineWidth = isSelected ? 5.1 : (layer.value(forKey: "baseLineWidth") as? CGFloat ?? 2.7)
                 layer.zPosition = isSelected ? 100 : 0
             }
@@ -1318,66 +1342,73 @@ private final class ComparisonLadderCanvasUIView: UIView {
         connections: [ComparisonLadderConnectionEntry],
         animatesLayout: Bool
     ) {
+        currentConnections = connections
         let liveIDs = Set(connections.map(\.id))
         for (id, layer) in connectionLayers where !liveIDs.contains(id) {
             layer.removeFromSuperlayer()
             connectionLayers[id] = nil
         }
         for connection in connections {
-            let path = connectionPath(connection: connection)
+            let geometry = connectionGeometry(connection: connection)
             let layer: CAShapeLayer
             if let existing = connectionLayers[connection.id] {
                 layer = existing
                 if animatesLayout {
-                    animate(layer: layer, keyPath: "path", to: path)
+                    animate(layer: layer, keyPath: "path", to: geometry.path)
                 }
-                layer.path = path
+                layer.path = geometry.path
                 layer.strokeColor = connection.color.withAlphaComponent(connectionAlpha(forVariance: connection.ratingVariance, coverage: connection.coverageRatio)).cgColor
-                layer.lineDashPattern = lineDashPattern(forCoverage: connection.coverageRatio)
+                layer.lineDashPattern = nil
             } else {
                 layer = shapeLayer(
-                    path: path,
+                    path: geometry.path,
                     color: connection.color.withAlphaComponent(connectionAlpha(forVariance: connection.ratingVariance, coverage: connection.coverageRatio)),
-                    lineWidth: connection.lineWidth,
-                    dashPattern: lineDashPattern(forCoverage: connection.coverageRatio)
+                    lineWidth: renderedConnectionLineWidth(connection),
+                    dashPattern: nil
                 )
                 connectionContainerLayer.addSublayer(layer)
                 connectionLayers[connection.id] = layer
             }
-            layer.opacity = 0.46
-            layer.lineWidth = connection.lineWidth
-            layer.setValue(connection.lineWidth, forKey: "baseLineWidth")
+            layer.opacity = 0.58
+            let lineWidth = renderedConnectionLineWidth(connection)
+            layer.lineWidth = lineWidth
+            layer.setValue(lineWidth, forKey: "baseLineWidth")
             layer.setValue(connection.productKey, forKey: "productKey")
             layer.setValue(connection.startNodeID, forKey: "startNodeID")
             layer.setValue(connection.endNodeID, forKey: "endNodeID")
         }
     }
 
+    private func updateConnectionGeometry(animatesLayout: Bool) {
+        for connection in currentConnections {
+            guard let layer = connectionLayers[connection.id] else { continue }
+            let geometry = connectionGeometry(connection: connection)
+            if animatesLayout {
+                animate(layer: layer, keyPath: "path", to: geometry.path)
+            }
+            layer.path = geometry.path
+        }
+    }
+
     private func connectionAlpha(forVariance variance: Double, coverage: CGFloat) -> CGFloat {
         let baseAlpha: CGFloat = switch variance {
         case 1.20...:
-            0.82
+            0.92
         case 0.35..<1.20:
-            0.76
+            0.88
         default:
-            0.70
+            0.84
         }
         return baseAlpha * (0.78 + min(1, max(0, coverage)) * 0.22)
     }
 
-    private func lineDashPattern(forCoverage coverage: CGFloat) -> [NSNumber]? {
-        let clamped = min(1, max(0, coverage))
-        guard clamped < 0.999 else { return nil }
-        if clamped >= 0.75 {
-            return [18, 6]
-        }
-        if clamped >= 0.5 {
-            return [10, 8]
-        }
-        return [4, 9]
+    private func renderedConnectionLineWidth(_ connection: ComparisonLadderConnectionEntry) -> CGFloat {
+        let clamped = min(1, max(0, connection.coverageRatio))
+        return connection.lineWidth * (0.78 + clamped * 0.22)
     }
 
     private func rebuildNodes(nodes: [ComparisonLadderNodeEntry], animatesLayout: Bool) {
+        currentNodeEntries = nodes
         let liveIDs = Set(nodes.map(\.id))
         for (id, layer) in nodeLayers where !liveIDs.contains(id) {
             layer.removeFromSuperlayer()
@@ -1394,18 +1425,227 @@ private final class ComparisonLadderCanvasUIView: UIView {
         }
     }
 
-    private func connectionPath(connection: ComparisonLadderConnectionEntry) -> CGPath {
-        let path = UIBezierPath()
-        path.move(to: connection.start)
-        let horizontalDistance = abs(connection.end.x - connection.start.x)
-        let direction: CGFloat = connection.end.x >= connection.start.x ? 1 : -1
-        let controlDistance = max(76, horizontalDistance * 0.42)
-        path.addCurve(
-            to: connection.end,
-            controlPoint1: CGPoint(x: connection.start.x + direction * controlDistance, y: connection.start.y),
-            controlPoint2: CGPoint(x: connection.end.x - direction * controlDistance, y: connection.end.y)
+    private func connectionGeometry(connection: ComparisonLadderConnectionEntry) -> ConnectionRenderGeometry {
+        let startCenter = iconCenter(forNodePosition: connection.start)
+        let endCenter = iconCenter(forNodePosition: connection.end)
+        let obstacles = connectionObstacles(
+            excluding: Set([connection.startNodeID, connection.endNodeID]),
+            lineWidth: renderedConnectionLineWidth(connection)
         )
-        return path.cgPath
+        let candidate = bestRouteCandidate(
+            start: startCenter,
+            end: endCenter,
+            obstacles: obstacles
+        )
+        let path = UIBezierPath()
+        path.move(to: startCenter)
+        path.addCurve(
+            to: endCenter,
+            controlPoint1: candidate.controlPoint1,
+            controlPoint2: candidate.controlPoint2
+        )
+        return ConnectionRenderGeometry(path: path.cgPath)
+    }
+
+    private func iconCenter(forNodePosition position: CGPoint) -> CGPoint {
+        let counterScale = Self.nodeCounterScale(for: currentScale)
+        return CGPoint(x: position.x, y: position.y - 12 * counterScale)
+    }
+
+    private func connectionObstacles(excluding excludedNodeIDs: Set<String>, lineWidth: CGFloat) -> [ConnectionObstacle] {
+        let counterScale = Self.nodeCounterScale(for: currentScale)
+        let radius = (17 + 16) * counterScale + lineWidth * 0.5
+        return currentNodeEntries.compactMap { entry in
+            guard !excludedNodeIDs.contains(entry.id),
+                  entry.isClusterExpanded || entry.isClusterRepresentative else {
+                return nil
+            }
+            return ConnectionObstacle(
+                center: iconCenter(forNodePosition: entry.position),
+                radius: radius
+            )
+        }
+    }
+
+    private func bestRouteCandidate(
+        start: CGPoint,
+        end: CGPoint,
+        obstacles: [ConnectionObstacle]
+    ) -> ConnectionRouteCandidate {
+        let candidates = routeCandidates(start: start, end: end, obstacles: obstacles)
+        guard var best = candidates.first else {
+            return straightRouteCandidate(start: start, end: end)
+        }
+        var bestScore = routeScore(start: start, end: end, candidate: best, obstacles: obstacles)
+        for candidate in candidates.dropFirst() {
+            let score = routeScore(start: start, end: end, candidate: candidate, obstacles: obstacles)
+            if score < bestScore {
+                best = candidate
+                bestScore = score
+            }
+        }
+        return best
+    }
+
+    private func routeCandidates(
+        start: CGPoint,
+        end: CGPoint,
+        obstacles: [ConnectionObstacle]
+    ) -> [ConnectionRouteCandidate] {
+        let horizontalDistance = abs(end.x - start.x)
+        let verticalDistance = abs(end.y - start.y)
+        let direction: CGFloat = end.x >= start.x ? 1 : -1
+        let baseControlDistance = max(72, horizontalDistance * 0.42)
+        let maxSemanticLift = semanticLiftLimit(horizontalDistance: horizontalDistance, verticalDistance: verticalDistance)
+        let liftBase = min(maxSemanticLift * 0.62, max(34, verticalDistance * 0.26 + horizontalDistance * 0.06))
+        var liftValues: [CGFloat] = [
+            0,
+            -liftBase,
+            liftBase,
+            -maxSemanticLift,
+            maxSemanticLift
+        ]
+        liftValues.append(contentsOf: obstacleAwareLiftValues(
+            start: start,
+            end: end,
+            obstacles: obstacles,
+            maxLift: maxSemanticLift
+        ))
+        let controlMultipliers: [CGFloat] = [0.78, 1, 1.22]
+
+        let uniqueLiftValues = liftValues.reduce(into: [CGFloat]()) { result, lift in
+            guard !result.contains(where: { abs($0 - lift) < 4 }) else { return }
+            result.append(lift)
+        }
+
+        return controlMultipliers.flatMap { multiplier in
+            uniqueLiftValues.map { lift in
+                let controlDistance = baseControlDistance * multiplier
+                let normalizedLift = abs(lift) / max(1, maxSemanticLift)
+                return ConnectionRouteCandidate(
+                    controlPoint1: CGPoint(x: start.x + direction * controlDistance, y: start.y + lift),
+                    controlPoint2: CGPoint(x: end.x - direction * controlDistance, y: end.y + lift),
+                    curvaturePenalty: normalizedLift * normalizedLift * 190 + abs(lift) * 0.035 + abs(multiplier - 1) * 16
+                )
+            }
+        }
+    }
+
+    private func semanticLiftLimit(horizontalDistance: CGFloat, verticalDistance: CGFloat) -> CGFloat {
+        min(168, max(76, horizontalDistance * 0.18 + verticalDistance * 0.45))
+    }
+
+    private func obstacleAwareLiftValues(
+        start: CGPoint,
+        end: CGPoint,
+        obstacles: [ConnectionObstacle],
+        maxLift: CGFloat
+    ) -> [CGFloat] {
+        let minX = min(start.x, end.x)
+        let maxX = max(start.x, end.x)
+        let horizontalSpan = max(1, maxX - minX)
+        let baselineY = (start.y + end.y) / 2
+        var values: [CGFloat] = []
+
+        for obstacle in obstacles {
+            let progress = (obstacle.center.x - minX) / horizontalSpan
+            guard progress > -0.04, progress < 1.04,
+                  distance(from: obstacle.center, toSegmentStart: start, end: end) < obstacle.radius + maxLift * 0.62 else {
+                continue
+            }
+            let verticalPadding = obstacle.radius + 34
+            values.append(min(max(obstacle.center.y - verticalPadding - baselineY, -maxLift), maxLift))
+            values.append(min(max(obstacle.center.y + verticalPadding - baselineY, -maxLift), maxLift))
+        }
+        return values
+    }
+
+    private func straightRouteCandidate(start: CGPoint, end: CGPoint) -> ConnectionRouteCandidate {
+        let direction: CGFloat = end.x >= start.x ? 1 : -1
+        let controlDistance = max(72, abs(end.x - start.x) * 0.42)
+        return ConnectionRouteCandidate(
+            controlPoint1: CGPoint(x: start.x + direction * controlDistance, y: start.y),
+            controlPoint2: CGPoint(x: end.x - direction * controlDistance, y: end.y),
+            curvaturePenalty: 0
+        )
+    }
+
+    private func routeScore(
+        start: CGPoint,
+        end: CGPoint,
+        candidate: ConnectionRouteCandidate,
+        obstacles: [ConnectionObstacle]
+    ) -> CGFloat {
+        let sampleCount = 40
+        var score = candidate.curvaturePenalty
+        var previous = start
+        var pathLength: CGFloat = 0
+        var semanticDeviation: CGFloat = 0
+
+        for index in 1...sampleCount {
+            let t = CGFloat(index) / CGFloat(sampleCount)
+            let point = cubicPoint(
+                t: t,
+                start: start,
+                controlPoint1: candidate.controlPoint1,
+                controlPoint2: candidate.controlPoint2,
+                end: end
+            )
+            pathLength += hypot(point.x - previous.x, point.y - previous.y)
+            previous = point
+            let expectedY = start.y + (end.y - start.y) * t
+            semanticDeviation += abs(point.y - expectedY)
+
+            guard t > 0.04, t < 0.96 else { continue }
+            for obstacle in obstacles {
+                let distance = hypot(point.x - obstacle.center.x, point.y - obstacle.center.y)
+                let penetration = obstacle.radius - distance
+                if penetration > 0 {
+                    score += 220_000 + penetration * 2_400
+                } else {
+                    let nearMiss = obstacle.radius + 34 - distance
+                    if nearMiss > 0 {
+                        score += nearMiss * nearMiss * 0.74
+                    }
+                }
+            }
+        }
+
+        let directDistance = max(1, hypot(end.x - start.x, end.y - start.y))
+        score += max(0, pathLength / directDistance - 1) * 210
+        score += semanticDeviation / CGFloat(sampleCount) * 0.92
+        return score
+    }
+
+    private func distance(from point: CGPoint, toSegmentStart start: CGPoint, end: CGPoint) -> CGFloat {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        let lengthSquared = dx * dx + dy * dy
+        guard lengthSquared > 0 else {
+            return hypot(point.x - start.x, point.y - start.y)
+        }
+        let rawT = ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared
+        let t = min(1, max(0, rawT))
+        let projection = CGPoint(x: start.x + dx * t, y: start.y + dy * t)
+        return hypot(point.x - projection.x, point.y - projection.y)
+    }
+
+    private func cubicPoint(
+        t: CGFloat,
+        start: CGPoint,
+        controlPoint1: CGPoint,
+        controlPoint2: CGPoint,
+        end: CGPoint
+    ) -> CGPoint {
+        let oneMinusT = 1 - t
+        let a = oneMinusT * oneMinusT * oneMinusT
+        let b = 3 * oneMinusT * oneMinusT * t
+        let c = 3 * oneMinusT * t * t
+        let d = t * t * t
+        return CGPoint(
+            x: a * start.x + b * controlPoint1.x + c * controlPoint2.x + d * end.x,
+            y: a * start.y + b * controlPoint1.y + c * controlPoint2.y + d * end.y
+        )
     }
 
     private func animate(layer: CALayer, keyPath: String, to value: Any) {

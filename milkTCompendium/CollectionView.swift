@@ -70,6 +70,9 @@ struct CollectionView: View {
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
+    let pendingDrafts: [PendingDrinkDraft]
+    let pendingDraftThumbnail: (PendingDrinkDraft) -> UIImage?
+    let onOpenPendingDrafts: () -> Void
 
     fileprivate static let defaultLadderScale: CGFloat = 0.40
     fileprivate static let initialLadderScale: CGFloat = defaultLadderScale
@@ -293,11 +296,22 @@ struct CollectionView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            CaptureBookmark(onCapture: {
-                onStartCapture()
-            }, onPhotoImport: {
-                onStartPhotoImport()
-            })
+            VStack(alignment: .trailing, spacing: 10) {
+                if isShowingMine, let recentPendingDraft {
+                    PendingDraftEntryButton(
+                        count: pendingDrafts.count,
+                        image: pendingDraftThumbnail(recentPendingDraft),
+                        action: onOpenPendingDrafts
+                    )
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+
+                CaptureBookmark(onCapture: {
+                    onStartCapture()
+                }, onPhotoImport: {
+                    onStartPhotoImport()
+                })
+            }
             .padding(.bottom, 48)
         }
         .overlay(alignment: .bottom) {
@@ -645,6 +659,10 @@ struct CollectionView: View {
 
     private var tasteScore: TasteScoreResult {
         TasteScoreCalculator.calculate(localDrinks: drinks, stats: tasteStatsStore.stats)
+    }
+
+    private var recentPendingDraft: PendingDrinkDraft? {
+        pendingDrafts.sorted { $0.createdAt > $1.createdAt }.first
     }
 
     private var normalizedSearchText: String {
@@ -2606,6 +2624,118 @@ private struct DeleteDropZone: View {
         .offset(y: isActive ? -6 : 0)
         .shadow(color: isActive ? .red.opacity(0.28) : .black.opacity(0.14), radius: isActive ? 24 : 18, y: isActive ? 12 : 8)
         .animation(.spring(response: 0.2, dampingFraction: 0.68), value: isActive)
+    }
+}
+
+private struct PendingDraftEntryButton: View {
+    let count: Int
+    let image: UIImage?
+    let action: () -> Void
+    @State private var isExpanded = true
+
+    var body: some View {
+        Button(action: action) {
+            labelContent
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("待记录，\(count) 张")
+        .task(id: count) {
+            await showTemporarily()
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.84), value: isExpanded)
+    }
+
+    @ViewBuilder
+    private var labelContent: some View {
+        if isExpanded {
+            HStack(spacing: 9) {
+                thumbnail
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("待记录")
+                        .font(.caption.weight(.bold))
+                    Text("\(count) 张")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
+            .foregroundStyle(.primary)
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .frame(height: 52)
+            .frame(width: 142, alignment: .leading)
+            .background(.white.opacity(0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.black.opacity(0.1), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 14, y: 7)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        } else {
+            ZStack(alignment: .topTrailing) {
+                thumbnail
+
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .black).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(Color.black.opacity(0.9))
+                    .clipShape(Circle())
+                    .offset(x: 5, y: -5)
+            }
+            .padding(8)
+            .frame(width: 56, height: 52)
+            .background(.white.opacity(0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.black.opacity(0.1), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 14, y: 7)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+    }
+
+    private var thumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 38, height: 38)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                Image(systemName: "tray")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 38, height: 38)
+    }
+
+    private func showTemporarily() async {
+        await MainActor.run {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                isExpanded = true
+            }
+        }
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        guard !Task.isCancelled else { return }
+        await MainActor.run {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                isExpanded = false
+            }
+        }
     }
 }
 
