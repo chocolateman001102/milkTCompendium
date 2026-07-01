@@ -397,6 +397,19 @@ struct DrinkFormView: View {
             .buttonStyle(.borderedProminent)
             .clipShape(Capsule())
             .disabled(!canSave)
+
+            if canSaveDraft {
+                Button {
+                    saveDraftAndDismiss()
+                } label: {
+                    Text("暂存")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                }
+                .buttonStyle(.bordered)
+                .clipShape(Capsule())
+            }
         }
     }
 
@@ -633,12 +646,22 @@ struct DrinkFormView: View {
         saveDraft()
     }
 
-    private func saveDraft() {
-        guard let input = makeDraftInput(), let onSaveDraft else { return }
+    private func saveDraftAndDismiss() {
+        guard canSaveDraft else { return }
+        guard saveDraft() else { return }
+        shouldKeepDraftOnDismiss = false
+        dismiss()
+    }
+
+    @discardableResult
+    private func saveDraft() -> Bool {
+        guard let input = makeDraftInput(), let onSaveDraft else { return false }
         do {
             currentDraft = try onSaveDraft(input)
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
