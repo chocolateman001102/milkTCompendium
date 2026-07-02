@@ -8,6 +8,8 @@ struct ProcessedDrinkImage {
 }
 
 enum DrinkImageProcessor {
+    fileprivate static let ciContext = CIContext()
+
     static func process(_ image: UIImage) async throws -> ProcessedDrinkImage {
         let normalizedImage = image
             .resizedAndNormalizedToFit(maxDimension: 3_200)
@@ -37,19 +39,24 @@ enum DrinkImageProcessor {
                     croppedToInstancesExtent: true
                 )
                 let ciImage = CIImage(cvPixelBuffer: buffer)
-                let context = CIContext()
-                guard let result = context.createCGImage(ciImage, from: ciImage.extent) else {
+                guard let result = createCGImage(from: ciImage) else {
                     throw ProcessingError.renderFailed
                 }
                 let cutout = UIImage(cgImage: result)
                 return cutout
                     .bestUprightDrinkOrientation(sourceSize: CGSize(width: cgImage.width, height: cgImage.height))
-                    .resizedAndNormalizedToFit(maxDimension: 1_800)
+                    .resizedAndNormalizedToFit(maxDimension: 1_760)
                     .removingLikelyHands()
                     .trimmingTransparentPadding(padding: 8)
+                    .enhancedForSticker()
                     .addingStickerOutline()
+                    .resizedWithLanczosToFit(maxDimension: 1_800)
             }
         }.value
+    }
+
+    fileprivate static func createCGImage(from image: CIImage, extent: CGRect? = nil) -> CGImage? {
+        ciContext.createCGImage(image, from: (extent ?? image.extent).integral)
     }
 
 }
@@ -302,54 +309,136 @@ private extension UIImage {
         return UIImage(cgImage: cropped, scale: scale, orientation: .up)
     }
 
+    func enhancedForSticker() -> UIImage {
+        guard let cgImage else { return self }
+
+        var output = CIImage(cgImage: cgImage)
+        output = output.applyingFilter(
+            "CIHighlightShadowAdjust",
+            parameters: [
+                "inputShadowAmount": 0.34,
+                "inputHighlightAmount": 0.96
+            ]
+        )
+        output = output.applyingFilter(
+            "CIColorControls",
+            parameters: [
+                kCIInputSaturationKey: 1.02,
+                kCIInputBrightnessKey: 0.008,
+                kCIInputContrastKey: 1.03
+            ]
+        )
+        output = output.applyingFilter(
+            "CIVibrance",
+            parameters: [
+                "inputAmount": 0.08
+            ]
+        )
+        output = output.applyingFilter(
+            "CIUnsharpMask",
+            parameters: [
+                kCIInputRadiusKey: 0.48,
+                kCIInputIntensityKey: 0.56
+            ]
+        )
+
+        guard let rendered = DrinkImageProcessor.createCGImage(from: output, extent: output.extent) else {
+            return self
+        }
+        return UIImage(cgImage: rendered, scale: scale, orientation: .up)
+    }
+
     func addingStickerOutline() -> UIImage {
-        let outerWidth: CGFloat = 18
-        let innerWidth: CGFloat = 11
-        let canvasInset = outerWidth + 4
-        let canvasSize = CGSize(width: size.width + canvasInset * 2, height: size.height + canvasInset * 2)
-        let origin = CGPoint(x: canvasInset, y: canvasInset)
+        guard let cgImage else { return self }
 
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = false
+        let outerRadius: CGFloat = 16
+        let innerRadius: CGFloat = 12
+        let glowRadius: CGFloat = 22
+        let canvasInset = glowRadius + 8
+        let canvasExtent = CGRect(
+            x: 0,
+            y: 0,
+            width: CGFloat(cgImage.width) + canvasInset * 2,
+            height: CGFloat(cgImage.height) + canvasInset * 2
+        )
+        let source = CIImage(cgImage: cgImage)
+            .transformed(by: CGAffineTransform(translationX: canvasInset, y: canvasInset))
+        let clearCanvas = CIImage(color: .clear).cropped(to: canvasExtent)
+        let sourceOnCanvas = source.composited(over: clearCanvas).cropped(to: canvasExtent)
+        let silhouette = solidColorImage(
+            color: CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+            maskedBy: sourceOnCanvas,
+            extent: canvasExtent
+        )
 
-        return UIGraphicsImageRenderer(size: canvasSize, format: format).image { _ in
-            let outerMask = tintedSilhouette(color: UIColor(red: 0.92, green: 0.67, blue: 0.38, alpha: 0.88))
-            let innerMask = tintedSilhouette(color: .white.withAlphaComponent(0.98))
+        let glow = solidColorImage(
+            color: CIColor(red: 0, green: 0, blue: 0, alpha: 0.10),
+            maskedBy: expandedSilhouette(from: silhouette, radius: glowRadius, extent: canvasExtent),
+            extent: canvasExtent
+        )
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 6.5])
+            .cropped(to: canvasExtent)
+        let outerOutline = solidColorImage(
+            color: CIColor(red: 1, green: 1, blue: 1, alpha: 0.92),
+            maskedBy: expandedSilhouette(from: silhouette, radius: outerRadius, extent: canvasExtent),
+            extent: canvasExtent
+        )
+        let innerOutline = solidColorImage(
+            color: CIColor(red: 1, green: 1, blue: 1, alpha: 0.98),
+            maskedBy: expandedSilhouette(from: silhouette, radius: innerRadius, extent: canvasExtent),
+            extent: canvasExtent
+        )
 
-            drawMask(outerMask, radius: outerWidth, around: origin)
-            drawMask(innerMask, radius: innerWidth, around: origin)
+        let output = sourceOnCanvas
+            .composited(over: innerOutline)
+            .composited(over: outerOutline)
+            .composited(over: glow)
+            .cropped(to: canvasExtent)
 
-            draw(at: origin)
+        guard let rendered = DrinkImageProcessor.createCGImage(from: output, extent: canvasExtent) else {
+            return self
         }
+        return UIImage(cgImage: rendered, scale: scale, orientation: .up)
     }
 
-    private func tintedSilhouette(color: UIColor) -> UIImage {
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = false
+    func resizedWithLanczosToFit(maxDimension: CGFloat) -> UIImage {
+        guard let cgImage else { return self }
+        let longestSide = max(CGFloat(cgImage.width), CGFloat(cgImage.height))
+        guard longestSide > maxDimension else { return self }
 
-        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            color.setFill()
-            UIRectFill(CGRect(origin: .zero, size: size))
-            draw(at: .zero, blendMode: .destinationIn, alpha: 1)
+        let input = CIImage(cgImage: cgImage)
+        let scale = maxDimension / longestSide
+        let output = input.applyingFilter(
+            "CILanczosScaleTransform",
+            parameters: [
+                kCIInputScaleKey: scale,
+                kCIInputAspectRatioKey: 1
+            ]
+        )
+        let targetExtent = CGRect(
+            x: output.extent.origin.x,
+            y: output.extent.origin.y,
+            width: floor(output.extent.width),
+            height: floor(output.extent.height)
+        )
+
+        guard let rendered = DrinkImageProcessor.createCGImage(from: output, extent: targetExtent) else {
+            return resizedAndNormalizedToFit(maxDimension: maxDimension)
         }
+        return UIImage(cgImage: rendered, scale: 1, orientation: .up)
     }
 
-    private func drawMask(_ mask: UIImage, radius: CGFloat, around origin: CGPoint) {
-        let steps = 32
-        for index in 0..<steps {
-            let angle = CGFloat(index) / CGFloat(steps) * .pi * 2
-            let offset = CGPoint(x: cos(angle) * radius, y: sin(angle) * radius)
-            mask.draw(at: CGPoint(x: origin.x + offset.x, y: origin.y + offset.y))
-        }
+    private func expandedSilhouette(from image: CIImage, radius: CGFloat, extent: CGRect) -> CIImage {
+        image
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: radius])
+            .cropped(to: extent)
+    }
 
-        let diagonalRadius = radius * 0.72
-        for index in 0..<steps {
-            let angle = (CGFloat(index) + 0.5) / CGFloat(steps) * .pi * 2
-            let offset = CGPoint(x: cos(angle) * diagonalRadius, y: sin(angle) * diagonalRadius)
-            mask.draw(at: CGPoint(x: origin.x + offset.x, y: origin.y + offset.y))
-        }
+    private func solidColorImage(color: CIColor, maskedBy mask: CIImage, extent: CGRect) -> CIImage {
+        CIImage(color: color)
+            .cropped(to: extent)
+            .applyingFilter("CISourceInCompositing", parameters: [kCIInputBackgroundImageKey: mask])
+            .cropped(to: extent)
     }
 
     private func rotatedByQuarterTurns(_ turns: Int) -> UIImage {
