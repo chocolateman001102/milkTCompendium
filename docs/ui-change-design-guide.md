@@ -1,10 +1,8 @@
 # UI 修改设计指南
 
-本文用于约束 `milkTCompendium` 的界面调整。它借鉴 `systematic-design-prompt.json.pdf` 的分层设计方法，但改写为适合当前 SwiftUI / iOS 17+ 项目的规则。
+本文用于约束 `milkTCompendium` 的界面调整。
 
 ## 可借鉴的部分
-
-PDF 里最值得采用的不是具体视觉风格，而是系统化思路：
 
 - 从设计哲学开始，再落到 token、组件、布局、响应式、文案、实现和 QA。
 - 每个视觉元素都要有功能理由，装饰不能先于信息表达。

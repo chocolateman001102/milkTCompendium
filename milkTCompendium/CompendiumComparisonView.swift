@@ -4,41 +4,25 @@ import UIKit
 struct CompendiumComparisonView: View {
     let localDrinks: [Drink]
     let sharedCompendiums: [SharedCompendium]
-    let initialOwnerID: String
     let localOwnerName: String
 
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedOwnerID: String
-    @State private var orderedSharedOwnerIDs: [String]
     @State private var selectedEntry: ComparisonLadderNodeEntry?
     @State private var highlightedOwnerID: String?
+    @State private var focusPickerRow: ComparisonSharedDrinkRow?
 
     init(
         localDrinks: [Drink],
         sharedCompendiums: [SharedCompendium],
-        initialOwnerID: String,
         localOwnerName: String
     ) {
         self.localDrinks = localDrinks
         self.sharedCompendiums = sharedCompendiums
-        self.initialOwnerID = initialOwnerID
         self.localOwnerName = localOwnerName
-        let shuffledOwnerIDs = Self.shuffledOwnerIDs(sharedCompendiums: sharedCompendiums, preferredFirstOwnerID: initialOwnerID)
-        _selectedOwnerID = State(initialValue: initialOwnerID)
-        _orderedSharedOwnerIDs = State(initialValue: shuffledOwnerIDs)
-    }
-
-    private var orderedSharedCompendiums: [SharedCompendium] {
-        let byOwnerID = Dictionary(uniqueKeysWithValues: sharedCompendiums.map { ($0.ownerID, $0) })
-        let ordered = orderedSharedOwnerIDs.compactMap { byOwnerID[$0] }
-        let missing = sharedCompendiums.filter { compendium in
-            !orderedSharedOwnerIDs.contains(compendium.ownerID)
-        }
-        return ordered + missing
     }
 
     private var comparisonOwners: [ComparisonOwnerColumn] {
-        let owners: [ComparisonOwnerSource] = [.local(localOwnerName)] + orderedSharedCompendiums.map { .shared($0) }
+        let owners: [ComparisonOwnerSource] = [.local(localOwnerName)] + sharedCompendiums.map { .shared($0) }
         let groupsByOwner = matchedGroups(for: owners)
         let sharedKeys = groupsByOwner
             .flatMap { $0.1.keys }
@@ -69,75 +53,6 @@ struct CompendiumComparisonView: View {
         .map { $0 }
     }
 
-    private var comparisonPartyMembers: [PixelPartyMember] {
-        let localMember = PixelPartyMember(
-            id: "local-\(SharedCompendiumStore.localOwnerID)",
-            name: localOwnerName,
-            pixelPerson: PixelPersonProfile.make(
-                ownerID: SharedCompendiumStore.localOwnerID,
-                ownerName: localOwnerName,
-                profile: TasteScoreCalculator.profile(from: localDrinks)
-            ),
-            isFocused: false
-        )
-        let sharedMembers = orderedSharedCompendiums.map { compendium in
-            PixelPartyMember(
-                id: compendium.ownerID,
-                name: compendium.ownerName,
-                pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(
-                    ownerID: compendium.ownerID,
-                    ownerName: compendium.ownerName,
-                    profile: TasteScoreCalculator.profile(from: compendium)
-                ),
-                isFocused: compendium.ownerID == selectedOwnerID
-            )
-        }
-        return [localMember] + sharedMembers
-    }
-
-    private static func shuffledOwnerIDs(
-        sharedCompendiums: [SharedCompendium],
-        preferredFirstOwnerID: String
-    ) -> [String] {
-        let ids = sharedCompendiums.map(\.ownerID)
-        guard !ids.isEmpty else { return [] }
-        var shuffled = ids.shuffled()
-        if let preferredIndex = shuffled.firstIndex(of: preferredFirstOwnerID) {
-            let preferred = shuffled.remove(at: preferredIndex)
-            shuffled.insert(preferred, at: 0)
-        }
-        return shuffled
-    }
-
-    private func moveSharedOwnerToFront(_ ownerID: String) {
-        guard let index = orderedSharedOwnerIDs.firstIndex(of: ownerID), index != 0 else { return }
-        var ids = orderedSharedOwnerIDs
-        let owner = ids.remove(at: index)
-        ids.insert(owner, at: 0)
-        applySharedOwnerOrder(ids)
-    }
-
-    private func moveSharedOwner(_ ownerID: String, by offset: Int) {
-        guard let index = orderedSharedOwnerIDs.firstIndex(of: ownerID) else { return }
-        let targetIndex = min(max(index + offset, 0), orderedSharedOwnerIDs.count - 1)
-        guard targetIndex != index else { return }
-        var ids = orderedSharedOwnerIDs
-        let owner = ids.remove(at: index)
-        ids.insert(owner, at: targetIndex)
-        applySharedOwnerOrder(ids)
-    }
-
-    private func shuffleSharedOwnerOrder() {
-        applySharedOwnerOrder(orderedSharedOwnerIDs.shuffled())
-    }
-
-    private func applySharedOwnerOrder(_ ownerIDs: [String]) {
-        orderedSharedOwnerIDs = ownerIDs
-        selectedOwnerID = ownerIDs.first ?? initialOwnerID
-        selectedEntry = nil
-        highlightedOwnerID = nil
-    }
-
     private func overlayRows(
         for selectedEntry: ComparisonLadderNodeEntry,
         owners: [ComparisonOwnerColumn]
@@ -148,7 +63,7 @@ struct CompendiumComparisonView: View {
                 ownerName: owner.name,
                 node: owner.nodes.first { $0.productKey == selectedEntry.node.productKey },
                 accent: ComparisonOwnerPalette.color(index: index),
-                isFocused: owner.id == selectedEntry.ownerID
+                isFocused: highlightedOwnerID == owner.id
             )
         }
     }
@@ -284,7 +199,6 @@ struct CompendiumComparisonView: View {
         let owners = comparisonOwners
         let rows = comparisonRows(owners: owners)
         let matchedProductCount = rows.count
-        let partyMembers = comparisonPartyMembers
         ZStack(alignment: .top) {
             if owners.count < 2 || matchedProductCount == 0 {
                 emptyState(title: "还没有共同喝过", subtitle: "至少需要两个人记录过同一款饮品。")
@@ -293,9 +207,10 @@ struct CompendiumComparisonView: View {
                 comparisonScoreBands(rows: rows, owners: owners)
             }
 
-            header(matchedProductCount: matchedProductCount, partyMembers: partyMembers)
-                .padding(.horizontal, 14)
+            backButton
+                .padding(.leading, 14)
                 .padding(.top, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(.systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
@@ -315,38 +230,65 @@ struct CompendiumComparisonView: View {
                 .zIndex(30)
             }
         }
+        .overlay {
+            if let focusPickerRow {
+                ComparisonFocusLadderOverlay(
+                    row: focusPickerRow,
+                    highlightedOwnerID: highlightedOwnerID,
+                    onSelect: selectOwnerFromFocusPicker,
+                    onClose: {
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            self.focusPickerRow = nil
+                        }
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(40)
+            }
+        }
     }
 
     private func comparisonScoreBands(rows: [ComparisonSharedDrinkRow], owners: [ComparisonOwnerColumn]) -> some View {
         let selectedProductKey = selectedEntry?.node.productKey
+        let highlightedOwner = owners.enumerated()
+            .first { $0.element.id == highlightedOwnerID }
+            .map { (index: $0.offset, owner: $0.element) }
 
         return ScrollView {
             LazyVStack(spacing: 0) {
                 ComparisonOverviewMapView(
                     rows: rows,
+                    participantCount: owners.count,
                     selectedProductKey: selectedProductKey,
                     onSelect: selectComparisonRow
                 )
                 .padding(.horizontal, 14)
-                .padding(.top, 136)
+                .padding(.top, 62)
                 .padding(.bottom, 8)
 
-                ComparisonOwnerFocusControl(
-                    owners: owners,
-                    highlightedOwnerID: highlightedOwnerID,
-                    onSelect: setHighlightedOwner
-                )
-                .padding(.horizontal, 14)
-                .padding(.bottom, 8)
+                if let highlightedOwner {
+                    ComparisonOwnerFocusStatus(
+                        ownerName: highlightedOwner.owner.name,
+                        color: ComparisonOwnerPalette.activeScorePointColor(index: highlightedOwner.index)
+                    ) {
+                        setHighlightedOwner(nil)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
+                }
 
                 ForEach(rows) { row in
                     ComparisonSharedDrinkRowView(
                         row: row,
                         isSelected: selectedProductKey == row.productKey,
-                        highlightedOwnerID: highlightedOwnerID
-                    ) {
-                        selectComparisonRow(row)
-                    }
+                        highlightedOwnerID: highlightedOwnerID,
+                        onFocusPick: {
+                            presentFocusPicker(for: row)
+                        },
+                        onTap: {
+                            selectComparisonRow(row)
+                        }
+                    )
                 }
             }
             .padding(.horizontal, 14)
@@ -371,85 +313,38 @@ struct CompendiumComparisonView: View {
         }
     }
 
-    private func header(matchedProductCount: Int, partyMembers: [PixelPartyMember]) -> some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 10) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 15, weight: .black))
-                        .foregroundStyle(.primary)
-                        .frame(width: 34, height: 34)
-                        .background(Color.black.opacity(0.055))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-
-                Menu {
-                    Button {
-                        shuffleSharedOwnerOrder()
-                    } label: {
-                        Label("随机重排", systemImage: "shuffle")
-                    }
-
-                    Divider()
-
-                    ForEach(Array(orderedSharedCompendiums.enumerated()), id: \.element.ownerID) { index, compendium in
-                        Menu {
-                            Button {
-                                moveSharedOwnerToFront(compendium.ownerID)
-                            } label: {
-                                Label("移到最前", systemImage: "arrow.up.to.line")
-                            }
-                            .disabled(index == 0)
-
-                            Button {
-                                moveSharedOwner(compendium.ownerID, by: -1)
-                            } label: {
-                                Label("前移", systemImage: "arrow.up")
-                            }
-                            .disabled(index == 0)
-
-                            Button {
-                                moveSharedOwner(compendium.ownerID, by: 1)
-                            } label: {
-                                Label("后移", systemImage: "arrow.down")
-                            }
-                            .disabled(index == orderedSharedCompendiums.count - 1)
-                        } label: {
-                            Text("\(index + 1). \(compendium.ownerName)")
-                        }
-                    }
-                } label: {
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 8) {
-                            PixelPartyLineView(members: partyMembers, maxVisible: 10)
-                                .frame(height: 42)
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .black))
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("\(matchedProductCount) 款共同饮品 · \(partyMembers.count) 人")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-            }
+    private func presentFocusPicker(for row: ComparisonSharedDrinkRow) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeOut(duration: 0.12)) {
+            focusPickerRow = row
         }
-        .padding(12)
-        .background(.white.opacity(0.96))
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(.black.opacity(0.1), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.04), radius: 9, y: 4)
-        .frame(maxWidth: 560)
+    }
+
+    private func selectOwnerFromFocusPicker(_ ownerID: String) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeOut(duration: 0.12)) {
+            highlightedOwnerID = ownerID
+            focusPickerRow = nil
+        }
+    }
+
+    private var backButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 15, weight: .black))
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color(.systemBackground).opacity(0.92))
+                .clipShape(Circle())
+                .overlay(
+                    Circle()
+                        .stroke(.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("返回")
     }
 
     private func emptyState(title: String, subtitle: String) -> some View {
@@ -746,6 +641,7 @@ private struct ComparisonOverviewMarker: Identifiable {
 
 private struct ComparisonOverviewMapView: View {
     let rows: [ComparisonSharedDrinkRow]
+    let participantCount: Int
     let selectedProductKey: String?
     let onSelect: (ComparisonSharedDrinkRow) -> Void
 
@@ -768,14 +664,18 @@ private struct ComparisonOverviewMapView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("共同饮品趋势")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.primary.opacity(0.82))
+            HStack(alignment: .lastTextBaseline, spacing: 10) {
+                Text("共饮对比")
+                    .font(.subheadline.weight(.black))
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .lineLimit(1)
+
                 Spacer(minLength: 8)
-                Text("\(rows.count) 款")
-                    .font(.caption2.weight(.semibold).monospacedDigit())
+
+                Text("\(rows.count) 款共同饮品 · \(participantCount) 人")
+                    .font(.caption.weight(.semibold).monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             GeometryReader { proxy in
@@ -914,78 +814,231 @@ private struct ComparisonOverviewMarkerView: View {
     }
 }
 
-private struct ComparisonOwnerFocusControl: View {
-    let owners: [ComparisonOwnerColumn]
-    let highlightedOwnerID: String?
-    let onSelect: (String?) -> Void
-
-    private var selectedOwner: (index: Int, owner: ComparisonOwnerColumn)? {
-        owners.enumerated().first { $0.element.id == highlightedOwnerID }
-            .map { (index: $0.offset, owner: $0.element) }
-    }
-
-    private var selectedColor: Color {
-        guard let selectedOwner else {
-            return ComparisonOwnerPalette.neutralScorePointColor
-        }
-        return ComparisonOwnerPalette.activeScorePointColor(index: selectedOwner.index)
-    }
-
-    private var selectedTitle: String {
-        guard let selectedOwner else { return "全部" }
-        return selectedOwner.owner.name
-    }
+private struct ComparisonOwnerFocusStatus: View {
+    let ownerName: String
+    let color: Color
+    let onClear: () -> Void
 
     var body: some View {
         HStack {
-            Menu {
-                Button {
-                    onSelect(nil)
-                } label: {
-                    Label("全部", systemImage: highlightedOwnerID == nil ? "checkmark" : "circle")
-                }
-
-                ForEach(Array(owners.enumerated()), id: \.element.id) { index, owner in
-                    Button {
-                        onSelect(owner.id)
-                    } label: {
-                        Label(owner.name, systemImage: highlightedOwnerID == owner.id ? "checkmark" : "circle")
-                    }
-                }
-            } label: {
+            Button(action: onClear) {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(highlightedOwnerID == nil ? selectedColor.opacity(0.42) : selectedColor.opacity(0.92))
-                        .frame(width: highlightedOwnerID == nil ? 6 : 8, height: highlightedOwnerID == nil ? 6 : 8)
+                        .fill(color.opacity(0.92))
+                        .frame(width: 8, height: 8)
                         .overlay(
                             Circle()
-                                .stroke(Color(.systemBackground).opacity(highlightedOwnerID == nil ? 0 : 0.95), lineWidth: 1)
+                                .stroke(Color(.systemBackground).opacity(0.95), lineWidth: 1)
                         )
 
-                    Text("聚焦：\(selectedTitle)")
-                        .font(.system(size: 10, weight: highlightedOwnerID == nil ? .medium : .semibold))
-                        .foregroundStyle(highlightedOwnerID == nil ? Color.secondary.opacity(0.88) : Color.primary.opacity(0.88))
+                    Text("聚焦：\(ownerName)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.primary.opacity(0.88))
                         .lineLimit(1)
                         .truncationMode(.tail)
 
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.secondary.opacity(0.72))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .black))
+                        .foregroundStyle(color.opacity(0.76))
                 }
                 .padding(.horizontal, 9)
                 .frame(height: 26)
                 .frame(maxWidth: 190, alignment: .leading)
-                .background(highlightedOwnerID == nil ? Color.black.opacity(0.025) : selectedColor.opacity(0.08))
+                .background(color.opacity(0.08))
                 .clipShape(Capsule())
                 .overlay(
                     Capsule()
-                        .stroke(highlightedOwnerID == nil ? Color.black.opacity(0.055) : selectedColor.opacity(0.22), lineWidth: 0.8)
+                        .stroke(color.opacity(0.22), lineWidth: 0.8)
                 )
             }
             .buttonStyle(.plain)
             Spacer(minLength: 0)
         }
-        .accessibilityLabel("选择要高亮的图鉴")
+        .accessibilityLabel("正在高亮 \(ownerName)，轻点取消")
+    }
+}
+
+private struct ComparisonFocusLadderOverlay: View {
+    let row: ComparisonSharedDrinkRow
+    let highlightedOwnerID: String?
+    let onSelect: (String) -> Void
+    let onClose: () -> Void
+
+    private static let topClearance: CGFloat = 118
+    private static let bottomClearance: CGFloat = 30
+
+    private var sortedParticipants: [ComparisonParticipantScore] {
+        row.participants.sorted { first, second in
+            if abs(first.rating - second.rating) > 0.0001 {
+                return first.rating > second.rating
+            }
+            return first.ownerIndex < second.ownerIndex
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = min(proxy.size.width - 28, 430)
+            let maxHeight = max(260, proxy.size.height - Self.topClearance - Self.bottomClearance)
+
+            ZStack {
+                Color.black.opacity(0.12)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onClose)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    header
+
+                    ScrollView {
+                        LazyVStack(spacing: 5) {
+                            ForEach(sortedParticipants) { participant in
+                                ComparisonFocusLadderRow(
+                                    participant: participant,
+                                    isFocused: highlightedOwnerID == participant.ownerID
+                                ) {
+                                    onSelect(participant.ownerID)
+                                }
+                            }
+                        }
+                        .padding(.bottom, 2)
+                    }
+                    .scrollIndicators(.hidden)
+                }
+                .padding(14)
+                .frame(width: width)
+                .frame(maxHeight: maxHeight, alignment: .top)
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(.black.opacity(0.08), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.16), radius: 24, y: 14)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, Self.topClearance)
+                .onTapGesture {}
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("选择要追踪的人")
+                    .font(.subheadline.weight(.black))
+                    .foregroundStyle(.primary)
+                Text(row.displayName)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 10)
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.primary.opacity(0.82))
+                    .frame(width: 28, height: 28)
+                    .background(Color.black.opacity(0.055))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+private struct ComparisonFocusLadderRow: View {
+    let participant: ComparisonParticipantScore
+    let isFocused: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(participant.color.opacity(0.92))
+                    .frame(width: 10, height: 10)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(.systemBackground).opacity(0.95), lineWidth: 1)
+                    )
+
+                Text(participant.ownerName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.88))
+                    .lineLimit(1)
+                    .frame(width: 74, alignment: .leading)
+
+                ComparisonFocusLadderTrack(
+                    rating: participant.rating,
+                    color: participant.color,
+                    isFocused: isFocused
+                )
+                .frame(height: 22)
+
+                Text(String(format: "%.2f", participant.rating))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(isFocused ? participant.color.opacity(0.95) : Color.primary.opacity(0.72))
+                    .frame(width: 34, alignment: .trailing)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 44)
+            .background(isFocused ? participant.color.opacity(0.08) : Color.black.opacity(0.025))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isFocused ? participant.color.opacity(0.24) : Color.black.opacity(0.045), lineWidth: 0.8)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("追踪 \(participant.ownerName)，评分 \(String(format: "%.2f", participant.rating))")
+    }
+}
+
+private struct ComparisonFocusLadderTrack: View {
+    let rating: Double
+    let color: Color
+    let isFocused: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width)
+            let pointSize: CGFloat = isFocused ? 10 : 8
+            let trackStart = pointSize / 2
+            let trackWidth = max(1, width - pointSize)
+            let centerY = proxy.size.height / 2
+            let x = trackStart + CGFloat(min(5, max(0, rating))) / 5 * trackWidth
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.black.opacity(0.055))
+                    .frame(width: trackWidth, height: 1.2)
+                    .position(x: trackStart + trackWidth / 2, y: centerY)
+
+                ForEach([0, 1, 2, 3, 4, 5], id: \.self) { score in
+                    Circle()
+                        .fill(Color.black.opacity(score == 0 || score == 5 ? 0.14 : 0.08))
+                        .frame(width: score == 0 || score == 5 ? 2.1 : 1.5, height: score == 0 || score == 5 ? 2.1 : 1.5)
+                        .position(x: trackStart + CGFloat(score) / 5 * trackWidth, y: centerY)
+                }
+
+                Circle()
+                    .fill(color.opacity(isFocused ? 0.96 : 0.78))
+                    .frame(width: pointSize, height: pointSize)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(.systemBackground).opacity(0.96), lineWidth: 1.1)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(color.opacity(isFocused ? 0.40 : 0.18), lineWidth: 0.8)
+                    )
+                    .position(x: x, y: centerY)
+            }
+            .frame(width: width, height: proxy.size.height)
+        }
     }
 }
 
@@ -993,6 +1046,7 @@ private struct ComparisonSharedDrinkRowView: View {
     let row: ComparisonSharedDrinkRow
     let isSelected: Bool
     let highlightedOwnerID: String?
+    let onFocusPick: () -> Void
     let onTap: () -> Void
 
     private var standardDeviationColor: Color {
@@ -1000,55 +1054,54 @@ private struct ComparisonSharedDrinkRowView: View {
     }
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.displayName)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.displayName)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                        Text(row.displayBrand)
-                            .font(.system(size: 8.8, weight: .medium))
-                            .foregroundStyle(.secondary.opacity(0.86))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Text(String(format: "%.2f", row.averageRating))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
-                        .foregroundStyle(isSelected ? standardDeviationColor.opacity(0.88) : Color.primary.opacity(0.74))
-                        .frame(width: 34, alignment: .trailing)
+                    Text(row.displayBrand)
+                        .font(.system(size: 8.8, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.86))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
-                ComparisonScoreBandView(
-                    participants: row.participants,
-                    averageRating: row.averageRating,
-                    lowestRating: row.lowestRating,
-                    highestRating: row.highestRating,
-                    standardDeviationColor: standardDeviationColor,
-                    isSelected: isSelected,
-                    highlightedOwnerID: highlightedOwnerID
-                )
-                .frame(height: isSelected || highlightedOwnerID != nil ? 22 : 18)
+                Spacer(minLength: 8)
+
+                Text(String(format: "%.2f", row.averageRating))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(isSelected ? standardDeviationColor.opacity(0.88) : Color.primary.opacity(0.74))
+                    .frame(width: 34, alignment: .trailing)
             }
-            .padding(.vertical, 3.5)
-            .padding(.horizontal, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(rowBackground)
-            .overlay(alignment: .leading) {
-                if isSelected {
-                    Capsule()
-                        .fill(standardDeviationColor.opacity(0.84))
-                        .frame(width: 2, height: 30)
-                        .offset(x: -7)
-                }
+
+            ComparisonScoreBandView(
+                participants: row.participants,
+                averageRating: row.averageRating,
+                lowestRating: row.lowestRating,
+                highestRating: row.highestRating,
+                standardDeviationColor: standardDeviationColor,
+                isSelected: isSelected,
+                highlightedOwnerID: highlightedOwnerID
+            )
+            .frame(height: isSelected || highlightedOwnerID != nil ? 22 : 18)
+        }
+        .padding(.vertical, 3.5)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(rowBackground)
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Capsule()
+                    .fill(standardDeviationColor.opacity(0.84))
+                    .frame(width: 2, height: 30)
+                    .offset(x: -7)
             }
         }
-        .buttonStyle(.plain)
+        .onTapGesture(perform: onTap)
+        .onLongPressGesture(minimumDuration: 0.35, perform: onFocusPick)
         .accessibilityLabel("\(row.displayBrand)，\(row.displayName)，均分 \(String(format: "%.2f", row.averageRating))，标准差 \(String(format: "%.2f", row.ratingStandardDeviation))")
     }
 
@@ -1173,9 +1226,9 @@ private struct ComparisonScoreBandView: View {
                                         .stroke(pointColor.opacity(isSelected || isOwnerFocused ? 0.42 : 0.12), lineWidth: isOwnerFocused ? 1 : 0.8)
                                 )
                         }
-                            .shadow(color: pointColor.opacity(isSelected || isOwnerFocused ? 0.14 : 0), radius: 2, y: 0.6)
-                            .position(x: group.x, y: centerY + group.yOffset)
-                            .accessibilityLabel("\(participant.ownerName) 评分 \(String(format: "%.2f", participant.rating))")
+                        .shadow(color: pointColor.opacity(isSelected || isOwnerFocused ? 0.14 : 0), radius: 2, y: 0.6)
+                        .position(x: group.x, y: centerY + group.yOffset)
+                        .accessibilityLabel("\(participant.ownerName) 评分 \(String(format: "%.2f", participant.rating))")
                     }
                 }
             }
@@ -1376,84 +1429,6 @@ private struct ComparisonOverlayRow: Identifiable {
     let node: ComparisonDrinkNode?
     let accent: Color
     let isFocused: Bool
-}
-
-struct PixelPartyMember: Identifiable, Hashable {
-    let id: String
-    let name: String
-    let pixelPerson: PixelPersonProfile
-    var isFocused: Bool = false
-}
-
-struct PixelPartyLineView: View {
-    let members: [PixelPartyMember]
-    var maxVisible: Int = 10
-    private let personWidth: CGFloat = 29
-    private let personHeight: CGFloat = 36
-    private let personSpacing: CGFloat = -2
-
-    private var visibleMembers: [PixelPartyMember] {
-        Array(members.prefix(maxVisible))
-    }
-
-    private var remainingCount: Int {
-        max(0, members.count - visibleMembers.count)
-    }
-
-    var body: some View {
-        HStack(spacing: 4) {
-            ZStack(alignment: .leading) {
-                handLinkLayer
-
-                HStack(spacing: personSpacing) {
-                    ForEach(visibleMembers) { member in
-                        PixelTinyPersonView(profile: member.pixelPerson, isFocused: member.isFocused)
-                            .frame(width: personWidth, height: personHeight)
-                            .accessibilityLabel("\(member.name) 的像素小小人")
-                    }
-                }
-            }
-            .frame(width: partyWidth, height: personHeight)
-
-            if remainingCount > 0 {
-                Text("+\(remainingCount)")
-                    .font(.system(size: 10, weight: .black, design: .rounded))
-                    .foregroundStyle(.primary)
-                    .padding(.horizontal, 7)
-                    .frame(height: 24)
-                    .background(Color.white.opacity(0.92))
-                    .clipShape(Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(.black.opacity(0.12), lineWidth: 1)
-                    )
-                    .padding(.leading, 4)
-            }
-        }
-        .accessibilityElement(children: .contain)
-    }
-
-    private var partyWidth: CGFloat {
-        guard visibleMembers.count > 0 else { return 0 }
-        return CGFloat(visibleMembers.count) * personWidth + CGFloat(max(visibleMembers.count - 1, 0)) * personSpacing
-    }
-
-    private var handLinkLayer: some View {
-        Canvas { context, _ in
-            guard visibleMembers.count > 1 else { return }
-            for index in 0..<(visibleMembers.count - 1) {
-                let left = visibleMembers[index].pixelPerson
-                let startX = CGFloat(index) * (personWidth + personSpacing) + personWidth - 3
-                let endX = CGFloat(index + 1) * (personWidth + personSpacing) + 3
-                let y = personHeight * 0.50
-                let skin = Color(pixelHex: left.skinHex)
-                let link = CGRect(x: startX, y: y, width: max(1, endX - startX), height: 3)
-                context.fill(Path(link), with: .color(skin))
-                context.stroke(Path(link), with: .color(.black.opacity(0.16)), lineWidth: 0.7)
-            }
-        }
-        .allowsHitTesting(false)
-    }
 }
 
 struct PixelTinyPersonView: View {
@@ -1711,13 +1686,12 @@ private struct ComparisonOverlayScoreSummary: View {
     private let pointSize: CGFloat = 9
 
     private var scorePoints: [OverlayScorePoint] {
-        rows.enumerated().compactMap { index, row in
+        rows.compactMap { row in
             guard let node = row.node else { return nil }
             return OverlayScorePoint(
                 id: row.id,
                 rating: node.aggregateRating,
                 color: row.accent,
-                yOffset: verticalOffset(index: index, count: rows.count),
                 isFocused: row.isFocused
             )
         }
@@ -1757,20 +1731,14 @@ private struct ComparisonOverlayScoreSummary: View {
                             .overlay(
                                 Circle()
                                     .stroke(Color(.systemBackground).opacity(0.96), lineWidth: 1)
-                            )
+                        )
                     }
-                    .position(x: x, y: centerY + point.yOffset)
+                    .position(x: x, y: centerY)
                 }
             }
             .frame(width: width, height: proxy.size.height)
         }
         .accessibilityLabel("当前饮品各图鉴评分位置")
-    }
-
-    private func verticalOffset(index: Int, count: Int) -> CGFloat {
-        guard count > 1 else { return 0 }
-        let offsets: [CGFloat] = [-3, 3, 0, -1.5, 1.5]
-        return offsets[index % offsets.count]
     }
 
     private func clampedRating(_ rating: Double) -> Double {
@@ -1782,7 +1750,6 @@ private struct OverlayScorePoint: Identifiable {
     let id: String
     let rating: Double
     let color: Color
-    let yOffset: CGFloat
     let isFocused: Bool
 }
 

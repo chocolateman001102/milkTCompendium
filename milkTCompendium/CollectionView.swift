@@ -346,11 +346,10 @@ struct CollectionView: View {
             }
         }
         .navigationDestination(isPresented: comparisonBinding) {
-            if let comparisonCompendium {
+            if comparisonCompendium != nil {
                 CompendiumComparisonView(
                     localDrinks: drinks,
                     sharedCompendiums: sharedStore.compendiums,
-                    initialOwnerID: comparisonCompendium.ownerID,
                     localOwnerName: localProfileName
                 )
             }
