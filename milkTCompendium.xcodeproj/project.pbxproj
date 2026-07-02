@@ -33,6 +33,7 @@
 		A1000000000000000000001A /* ZoomCanvasViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000001A /* ZoomCanvasViewport.swift */; };
 		A100000000000000000001C /* DataMigrationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000001C /* DataMigrationManager.swift */; };
 		A100000000000000000001D /* ShareSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000001D /* ShareSheet.swift */; };
+		A100000000000000000001E /* PendingDrinkDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000000000000000001E /* PendingDrinkDraft.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -64,6 +65,7 @@
 		A2000000000000000000001B /* AppIcon83.5x83.5@2x~ipad.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "AppIcon83.5x83.5@2x~ipad.png"; sourceTree = "<group>"; };
 		A200000000000000000001C /* DataMigrationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataMigrationManager.swift; sourceTree = "<group>"; };
 		A200000000000000000001D /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
+		A200000000000000000001E /* PendingDrinkDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingDrinkDraft.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -115,6 +117,7 @@
 				A2000000000000000000000D /* BrandStore.swift */,
 				A200000000000000000001C /* DataMigrationManager.swift */,
 				A200000000000000000001D /* ShareSheet.swift */,
+				A200000000000000000001E /* PendingDrinkDraft.swift */,
 			);
 			path = milkTCompendium;
 			sourceTree = "<group>";
@@ -222,6 +225,7 @@
 				A1000000000000000000000D /* BrandStore.swift in Sources */,
 				A100000000000000000001C /* DataMigrationManager.swift in Sources */,
 				A100000000000000000001D /* ShareSheet.swift in Sources */,
+				A100000000000000000001E /* PendingDrinkDraft.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

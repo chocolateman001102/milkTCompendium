@@ -13,11 +13,17 @@ struct DrinkFormView: View {
 
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @Query(sort: \Drink.createdAt, order: .reverse) private var existingDrinks: [Drink]
 
     let mode: Mode
     let initialImage: UIImage?
+    let initialDraft: PendingDrinkDraft?
+    let initialDraftOriginalImage: UIImage?
+    let initialDraftStickerImage: UIImage?
     let startWithCamera: Bool
+    let onSaveDraft: ((PendingDrinkDraftInput) throws -> PendingDrinkDraft)?
+    let onFinalSaveDraft: (PendingDrinkDraft) -> Void
     let onSaved: () -> Void
 
     @State private var brand = ""
@@ -42,14 +48,32 @@ struct DrinkFormView: View {
     @State private var isProcessing = false
     @State private var duplicateCandidate: Drink?
     @State private var errorMessage: String?
+    @State private var showingCancelDraftDialog = false
+    @State private var currentDraft: PendingDrinkDraft?
+    @State private var shouldKeepDraftOnDismiss = true
 
     private let sweetnessOptions = ["全糖", "正常糖", "少糖", "七分糖", "半糖", "三分糖", "微糖", "无糖", "不另外加糖"]
     private let iceOptions = ["多冰", "正常冰", "少冰", "微冰", "去冰", "常温", "温", "热"]
 
-    init(mode: Mode, initialImage: UIImage? = nil, startWithCamera: Bool = false, onSaved: @escaping () -> Void) {
+    init(
+        mode: Mode,
+        initialImage: UIImage? = nil,
+        initialDraft: PendingDrinkDraft? = nil,
+        initialDraftOriginalImage: UIImage? = nil,
+        initialDraftStickerImage: UIImage? = nil,
+        startWithCamera: Bool = false,
+        onSaveDraft: ((PendingDrinkDraftInput) throws -> PendingDrinkDraft)? = nil,
+        onFinalSaveDraft: @escaping (PendingDrinkDraft) -> Void = { _ in },
+        onSaved: @escaping () -> Void
+    ) {
         self.mode = mode
         self.initialImage = initialImage
+        self.initialDraft = initialDraft
+        self.initialDraftOriginalImage = initialDraftOriginalImage
+        self.initialDraftStickerImage = initialDraftStickerImage
         self.startWithCamera = startWithCamera
+        self.onSaveDraft = onSaveDraft
+        self.onFinalSaveDraft = onFinalSaveDraft
         self.onSaved = onSaved
 
         if case .edit(let drink) = mode {
@@ -64,6 +88,20 @@ struct DrinkFormView: View {
             _cupCount = State(initialValue: max(1, drink.cupCount))
             _originalImage = State(initialValue: ImageStore.load(drink.originalImageName))
             _stickerImage = State(initialValue: ImageStore.load(drink.stickerImageName))
+        } else if let initialDraft {
+            _brand = State(initialValue: initialDraft.brand)
+            _name = State(initialValue: initialDraft.name)
+            _sweetness = State(initialValue: initialDraft.sweetness)
+            _iceLevel = State(initialValue: initialDraft.iceLevel)
+            _rating = State(initialValue: initialDraft.rating)
+            _consumedAt = State(initialValue: initialDraft.consumedAt)
+            _note = State(initialValue: initialDraft.note)
+            _isLimited = State(initialValue: initialDraft.isLimited)
+            _cupCount = State(initialValue: max(1, initialDraft.cupCount))
+            _originalImage = State(initialValue: initialDraftOriginalImage)
+            _stickerImage = State(initialValue: initialDraftStickerImage)
+            _didProcessInitialImage = State(initialValue: true)
+            _currentDraft = State(initialValue: initialDraft)
         }
     }
 
@@ -72,7 +110,7 @@ struct DrinkFormView: View {
             VStack(spacing: 10) {
                 mediaRatingCard
                 infoCard
-                saveButton
+                actionButtons
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -90,9 +128,12 @@ struct DrinkFormView: View {
         .toolbar {
             if !isEditing {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("取消") {
-                        dismiss()
+                    Button {
+                        handleCancel()
+                    } label: {
+                        Image(systemName: "xmark")
                     }
+                    .accessibilityLabel("关闭")
                 }
             }
         }
@@ -137,6 +178,13 @@ struct DrinkFormView: View {
                 }
             }
         }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            autoSaveDraft()
+        }
+        .onDisappear {
+            autoSaveDraft()
+        }
         .alert("处理失败", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -163,6 +211,7 @@ struct DrinkFormView: View {
             }
             Button("忽略这次") {
                 duplicateCandidate = nil
+                discardDraftIfNeeded()
                 dismiss()
             }
             Button("取消", role: .cancel) {
@@ -172,6 +221,19 @@ struct DrinkFormView: View {
             if let duplicateCandidate {
                 Text("\(duplicateCandidate.brand) · \(duplicateCandidate.name)\n已喝 \(duplicateCandidate.cupCount) 杯 · 评分 \(String(format: "%.2f", duplicateCandidate.rating))")
             }
+        }
+        .confirmationDialog(
+            "丢弃这次记录？",
+            isPresented: $showingCancelDraftDialog,
+            titleVisibility: .visible
+        ) {
+            Button("丢弃", role: .destructive) {
+                discardDraftIfNeeded()
+                dismiss()
+            }
+            Button("继续编辑", role: .cancel) {}
+        } message: {
+            Text("这会删除已经自动暂存的照片草稿。")
         }
     }
 
@@ -191,60 +253,67 @@ struct DrinkFormView: View {
     }
 
     private var photoPreview: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.white)
-
-            if let stickerImage {
-                Button {
-                    showingStickerPreview = true
-                } label: {
-                    ZStack(alignment: .bottomTrailing) {
-                        Image(uiImage: stickerImage)
-                            .resizable()
-                            .scaledToFit()
-                            .padding(10)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                        Image(systemName: "plus.magnifyingglass")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.primary)
-                            .padding(7)
-                            .background(.white.opacity(0.92))
-                            .clipShape(Circle())
-                            .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
-                            .padding(8)
-                    }
-                }
-                .buttonStyle(.plain)
-            } else if let originalImage {
-                Image(uiImage: originalImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            } else {
-                VStack(spacing: 7) {
-                    Image(systemName: "camera.viewfinder")
-                        .font(.system(size: 28, weight: .light))
-                    Text("添加照片")
-                        .font(.subheadline.weight(.semibold))
-                    Text("生成贴图")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .foregroundStyle(.secondary)
-            }
-
-            if isProcessing {
+        GeometryReader { proxy in
+            let size = proxy.size
+            ZStack {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.black.opacity(0.28))
-                ProgressView()
-                    .tint(.white)
+                    .fill(.white)
+
+                if let stickerImage {
+                    Button {
+                        showingStickerPreview = true
+                    } label: {
+                        ZStack(alignment: .bottomTrailing) {
+                            Image(uiImage: stickerImage)
+                                .resizable()
+                                .scaledToFit()
+                                .padding(10)
+                                .frame(width: size.width, height: size.height)
+                                .clipped()
+
+                            Image(systemName: "plus.magnifyingglass")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.primary)
+                                .padding(7)
+                                .background(.white.opacity(0.92))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.08), radius: 6, y: 2)
+                                .padding(8)
+                        }
+                        .frame(width: size.width, height: size.height)
+                    }
+                    .buttonStyle(.plain)
+                } else if let originalImage {
+                    Image(uiImage: originalImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .clipped()
+                } else {
+                    VStack(spacing: 7) {
+                        Image(systemName: "camera.viewfinder")
+                            .font(.system(size: 28, weight: .light))
+                        Text("添加照片")
+                            .font(.subheadline.weight(.semibold))
+                        Text("生成贴图")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(.secondary)
+                }
+
+                if isProcessing {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.black.opacity(0.28))
+                    ProgressView()
+                        .tint(.white)
+                }
             }
+            .frame(width: size.width, height: size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .clipped()
         }
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .clipped()
     }
 
     private var photoActions: some View {
@@ -314,19 +383,34 @@ struct DrinkFormView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var saveButton: some View {
-        Button {
-            save()
-        } label: {
-            Text(isEditing ? "保存" : "加入图鉴")
-                .contentTransition(.numericText())
-                .font(.headline)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 11)
+    private var actionButtons: some View {
+        VStack(spacing: 8) {
+            Button {
+                save()
+            } label: {
+                Text(isEditing ? "保存" : "加入图鉴")
+                    .contentTransition(.numericText())
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+            }
+            .buttonStyle(.borderedProminent)
+            .clipShape(Capsule())
+            .disabled(!canSave)
+
+            if canSaveDraft {
+                Button {
+                    saveDraftAndDismiss()
+                } label: {
+                    Text("暂存")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                }
+                .buttonStyle(.bordered)
+                .clipShape(Capsule())
+            }
         }
-        .buttonStyle(.borderedProminent)
-        .clipShape(Capsule())
-        .disabled(!canSave)
     }
 
     private var canSave: Bool {
@@ -334,6 +418,13 @@ struct DrinkFormView: View {
             && !brand.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !isProcessing
+    }
+
+    private var canSaveDraft: Bool {
+        !isEditing
+            && originalImage != nil
+            && stickerImage != nil
+            && onSaveDraft != nil
     }
 
     private var isEditing: Bool {
@@ -355,6 +446,7 @@ struct DrinkFormView: View {
             let processed = try await DrinkImageProcessor.process(displayImage)
             didChangeImage = true
             stickerImage = processed.sticker
+            autoSaveDraft()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -430,6 +522,9 @@ struct DrinkFormView: View {
                 try modelContext.save()
             }
             BrandStore.remember(cleanedBrand)
+            if case .create = mode {
+                finishDraftAfterSuccessfulSave()
+            }
             onSaved()
             dismiss()
         } catch {
@@ -461,6 +556,7 @@ struct DrinkFormView: View {
             drink.stickerImageName = try ImageStore.saveSticker(stickerImage)
             try modelContext.save()
             BrandStore.remember(cleanedBrand)
+            finishDraftAfterSuccessfulSave()
             onSaved()
             dismiss()
         } catch {
@@ -472,6 +568,7 @@ struct DrinkFormView: View {
         do {
             drink.cupCount = max(1, drink.cupCount + 1)
             try modelContext.save()
+            finishDraftAfterSuccessfulSave()
             onSaved()
             dismiss()
         } catch {
@@ -534,6 +631,72 @@ struct DrinkFormView: View {
         @unknown default:
             errorMessage = "无法确认相机权限，请稍后再试。"
         }
+    }
+
+    private func handleCancel() {
+        if canSaveDraft {
+            showingCancelDraftDialog = true
+        } else {
+            dismiss()
+        }
+    }
+
+    private func autoSaveDraft() {
+        guard shouldKeepDraftOnDismiss, canSaveDraft else { return }
+        saveDraft()
+    }
+
+    private func saveDraftAndDismiss() {
+        guard canSaveDraft else { return }
+        guard saveDraft() else { return }
+        shouldKeepDraftOnDismiss = false
+        dismiss()
+    }
+
+    @discardableResult
+    private func saveDraft() -> Bool {
+        guard let input = makeDraftInput(), let onSaveDraft else { return false }
+        do {
+            currentDraft = try onSaveDraft(input)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    private func discardDraftIfNeeded() {
+        shouldKeepDraftOnDismiss = false
+        if let currentDraft {
+            onFinalSaveDraft(currentDraft)
+            self.currentDraft = nil
+        }
+    }
+
+    private func finishDraftAfterSuccessfulSave() {
+        shouldKeepDraftOnDismiss = false
+        if let currentDraft {
+            onFinalSaveDraft(currentDraft)
+            self.currentDraft = nil
+        }
+    }
+
+    private func makeDraftInput() -> PendingDrinkDraftInput? {
+        guard let originalImage, let stickerImage else { return nil }
+        return PendingDrinkDraftInput(
+            existingDraft: currentDraft,
+            originalImage: originalImage,
+            stickerImage: stickerImage,
+            brand: brand,
+            name: name,
+            sweetness: sweetness,
+            iceLevel: iceLevel,
+            rating: rating,
+            consumedAt: consumedAt,
+            note: note,
+            isLimited: isLimited,
+            cupCount: cupCount
+        )
     }
 }
 

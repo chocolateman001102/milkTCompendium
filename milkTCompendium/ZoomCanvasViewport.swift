@@ -61,6 +61,45 @@ final class ZoomCanvasViewportController {
         pendingReset = nil
     }
 
+    func zoom(
+        to zoomScale: CGFloat,
+        centeredAtContentPoint contentPoint: CGPoint,
+        animated: Bool,
+        completion: (() -> Void)? = nil
+    ) {
+        guard let scrollView, hasUsableGeometry else {
+            completion?()
+            return
+        }
+
+        pendingReset = nil
+        let scale = clampedZoomScale(zoomScale, in: scrollView)
+        let focus = clampedContentPoint(contentPoint)
+        let targetSize = CGSize(
+            width: scrollView.bounds.width / scale,
+            height: scrollView.bounds.height / scale
+        )
+        let targetRect = CGRect(
+            x: focus.x - targetSize.width / 2,
+            y: focus.y - targetSize.height / 2,
+            width: targetSize.width,
+            height: targetSize.height
+        )
+
+        guard animated else {
+            scrollView.zoom(to: targetRect, animated: false)
+            reconcileGeometry(clampLargeContent: true)
+            completion?()
+            return
+        }
+
+        scrollView.zoom(to: targetRect, animated: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
+            self?.reconcileGeometry(clampLargeContent: true)
+            completion?()
+        }
+    }
+
     /// Keeps an undersized canvas centered without changing the user's valid
     /// pan position on axes that are larger than the viewport.
     func updateContentInsets() {
@@ -82,19 +121,15 @@ final class ZoomCanvasViewportController {
         let scale = clampedZoomScale(reset.zoomScale, in: scrollView)
         pendingReset = nil
 
-        // `zoom(to:)` derives its scale from the scroll view's transient
-        // contentSize.  Set the scale directly, then set a content offset from
-        // stable source-space geometry instead.
+        // Set the scale directly, then derive the offset from stable
+        // source-space geometry instead of the scroll view's transient
+        // contentSize.
         scrollView.setZoomScale(scale, animated: false)
         reconcileGeometry(clampLargeContent: false)
 
         let inset = contentInset(for: scrollView, scale: scale)
-        let desiredOffset = CGPoint(
-            x: focusPoint.x * scale - scrollView.bounds.midX - inset.left,
-            y: focusPoint.y * scale - scrollView.bounds.midY - inset.top
-        )
         setContentOffset(
-            clampedOffset(desiredOffset, in: scrollView, scale: scale, inset: inset),
+            centeredOffset(on: focusPoint, in: scrollView, scale: scale, inset: inset),
             on: scrollView
         )
     }
@@ -149,6 +184,26 @@ final class ZoomCanvasViewportController {
 
     private func scaledCanvasSize(for scale: CGFloat) -> CGSize {
         CGSize(width: canvasSize.width * scale, height: canvasSize.height * scale)
+    }
+
+    private func clampedContentPoint(_ point: CGPoint) -> CGPoint {
+        CGPoint(
+            x: min(max(point.x, 0), canvasSize.width),
+            y: min(max(point.y, 0), canvasSize.height)
+        )
+    }
+
+    private func centeredOffset(
+        on contentPoint: CGPoint,
+        in scrollView: UIScrollView,
+        scale: CGFloat,
+        inset: UIEdgeInsets
+    ) -> CGPoint {
+        let desiredOffset = CGPoint(
+            x: contentPoint.x * scale - scrollView.bounds.midX,
+            y: contentPoint.y * scale - scrollView.bounds.midY
+        )
+        return clampedOffset(desiredOffset, in: scrollView, scale: scale, inset: inset)
     }
 
     private func contentInset(for scrollView: UIScrollView, scale: CGFloat) -> UIEdgeInsets {

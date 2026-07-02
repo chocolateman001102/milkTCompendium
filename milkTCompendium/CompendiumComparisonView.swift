@@ -2,226 +2,349 @@ import SwiftUI
 import UIKit
 
 struct CompendiumComparisonView: View {
-    fileprivate static let minimumZoomScale: CGFloat = 0.36
-    fileprivate static let initialZoomScale: CGFloat = 0.40
-    private static let ladderTopControlClearance: CGFloat = 154
-    private static let ladderBottomControlClearance: CGFloat = 42
-    private static let ladderCanvasVerticalSafePadding: CGFloat = 64
-
     let localDrinks: [Drink]
     let sharedCompendiums: [SharedCompendium]
-    let initialOwnerID: String
     let localOwnerName: String
 
     @Environment(\.dismiss) private var dismiss
-    @State private var selectedOwnerID: String
-    @State private var zoomScale: CGFloat = Self.initialZoomScale
-    @State private var centerResetToken = 0
-    @State private var selectedNode: ComparisonDrinkNode?
-    @StateObject private var layoutCache = ComparisonLadderLayoutCache()
+    @State private var selectedEntry: ComparisonLadderNodeEntry?
+    @State private var highlightedOwnerID: String?
+    @State private var focusPickerRow: ComparisonSharedDrinkRow?
 
     init(
         localDrinks: [Drink],
         sharedCompendiums: [SharedCompendium],
-        initialOwnerID: String,
         localOwnerName: String
     ) {
         self.localDrinks = localDrinks
         self.sharedCompendiums = sharedCompendiums
-        self.initialOwnerID = initialOwnerID
         self.localOwnerName = localOwnerName
-        _selectedOwnerID = State(initialValue: initialOwnerID)
     }
 
-    private var sharedCompendium: SharedCompendium {
-        sharedCompendiums.first { $0.ownerID == selectedOwnerID }
-            ?? sharedCompendiums.first
-            ?? SharedCompendium(ownerID: initialOwnerID, ownerName: "TA", exportedAt: .distantPast, drinks: [])
+    private var comparisonOwners: [ComparisonOwnerColumn] {
+        let owners: [ComparisonOwnerSource] = [.local(localOwnerName)] + sharedCompendiums.map { .shared($0) }
+        let groupsByOwner = matchedGroups(for: owners)
+        let sharedKeys = groupsByOwner
+            .flatMap { $0.1.keys }
+            .reduce(into: [:]) { counts, key in counts[key, default: 0] += 1 }
+            .filter { $0.value >= 2 }
+            .map(\.key)
+        let sharedKeySet = Set(sharedKeys)
+
+        return groupsByOwner.map { owner, groups in
+            let nodes = groups
+                .filter { sharedKeySet.contains($0.key) }
+                .map { key, items in
+                    makeNode(
+                        owner: owner,
+                        key: key,
+                        items: items
+                    )
+                }
+                .sorted { first, second in
+                    if first.aggregateRating == second.aggregateRating {
+                        return first.displayName.localizedStandardCompare(second.displayName) == .orderedAscending
+                    }
+                    return first.aggregateRating > second.aggregateRating
+                }
+            return ComparisonOwnerColumn(id: owner.id, name: owner.name, nodes: nodes)
+        }
+        .filter { !$0.nodes.isEmpty }
+        .map { $0 }
     }
 
-    private var comparison: CompendiumComparison {
-        CompendiumComparisonBuilder.build(
-            localDrinks: localDrinks,
-            sharedCompendium: sharedCompendium,
-            localOwnerName: localOwnerName
-        )
+    private func overlayRows(
+        for selectedEntry: ComparisonLadderNodeEntry,
+        owners: [ComparisonOwnerColumn]
+    ) -> [ComparisonOverlayRow] {
+        owners.enumerated().map { index, owner in
+            ComparisonOverlayRow(
+                id: owner.id,
+                ownerName: owner.name,
+                node: owner.nodes.first { $0.productKey == selectedEntry.node.productKey },
+                accent: ComparisonOwnerPalette.color(index: index),
+                isFocused: highlightedOwnerID == owner.id
+            )
+        }
     }
 
-    private var visibleLocalNodes: [ComparisonDrinkNode] {
-        comparison.pairs.map(\.local)
+    private func matchedGroups(
+        for owners: [ComparisonOwnerSource]
+    ) -> [(ComparisonOwnerSource, [String: [LadderDrinkDisplayItem]])] {
+        var rawGroupsByOwner: [(ComparisonOwnerSource, [RawComparisonProductGroup])] = []
+        rawGroupsByOwner.reserveCapacity(owners.count)
+
+        for (ownerIndex, owner) in owners.enumerated() {
+            let items: [LadderDrinkDisplayItem] = switch owner {
+            case .local:
+                localDrinks.map(LadderDrinkDisplayItem.init(drink:))
+            case .shared(let compendium):
+                compendium.drinks.map { LadderDrinkDisplayItem(sharedDrink: $0, ownerID: compendium.ownerID) }
+            }
+            let groups = Dictionary(grouping: items, by: DrinkProductMatcher.productKey(for:))
+                .filter { !$0.key.isEmpty }
+                .map { key, items in
+                    let representative = representativeItem(from: items)
+                    return RawComparisonProductGroup(
+                        ownerIndex: ownerIndex,
+                        key: key,
+                        items: items,
+                        representative: representative,
+                        fallbackNameKey: representative.map(DrinkProductMatcher.normalizedName(for:)) ?? "",
+                        fallbackBrandKey: representative.map(DrinkProductMatcher.normalizedBrand(for:)) ?? ""
+                    )
+                }
+            rawGroupsByOwner.append((owner, groups))
+        }
+        let rawGroups = rawGroupsByOwner.flatMap(\.1)
+        let canonicalKeyByRawGroup = canonicalProductKeys(for: rawGroups)
+
+        return rawGroupsByOwner.map { owner, groups in
+            var canonicalGroups: [String: [LadderDrinkDisplayItem]] = [:]
+            for group in groups {
+                let canonicalKey = canonicalKeyByRawGroup[group.id] ?? group.key
+                canonicalGroups[canonicalKey, default: []].append(contentsOf: group.items)
+            }
+            return (owner, canonicalGroups)
+        }
     }
 
-    private var visiblePeerNodes: [ComparisonDrinkNode] {
-        comparison.pairs.map(\.peer)
+    private func representativeItem(from items: [LadderDrinkDisplayItem]) -> LadderDrinkDisplayItem? {
+        items.sorted { first, second in
+            if first.consumedAt == second.consumedAt {
+                return first.createdAt > second.createdAt
+            }
+            return first.consumedAt > second.consumedAt
+        }.first
     }
 
-    private var visiblePairs: [ComparisonDrinkPair] {
-        comparison.pairs
-    }
+    private func canonicalProductKeys(for groups: [RawComparisonProductGroup]) -> [String: String] {
+        var parent = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0.id) })
+        var ownerIndexesByRoot = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, Set([$0.ownerIndex])) })
 
-    private var selectedPair: ComparisonDrinkPair? {
-        guard let selectedNode, let pairID = selectedNode.matchedPairID else { return nil }
-        return comparison.pairs.first { $0.id == pairID }
+        func root(_ id: String) -> String {
+            var current = id
+            var path: [String] = []
+            while parent[current] != current, let next = parent[current] {
+                path.append(current)
+                current = next
+            }
+            for node in path {
+                parent[node] = current
+            }
+            return current
+        }
+
+        func union(_ first: String, _ second: String) {
+            var firstRoot = root(first)
+            var secondRoot = root(second)
+            guard firstRoot != secondRoot else { return }
+            guard var firstOwnerIndexes = ownerIndexesByRoot[firstRoot],
+                  let secondOwnerIndexes = ownerIndexesByRoot[secondRoot],
+                  firstOwnerIndexes.isDisjoint(with: secondOwnerIndexes) else { return }
+            if firstOwnerIndexes.count < secondOwnerIndexes.count {
+                swap(&firstRoot, &secondRoot)
+                firstOwnerIndexes = secondOwnerIndexes
+            }
+            parent[secondRoot] = firstRoot
+            firstOwnerIndexes.formUnion(ownerIndexesByRoot[secondRoot] ?? [])
+            ownerIndexesByRoot[firstRoot] = firstOwnerIndexes
+            ownerIndexesByRoot[secondRoot] = nil
+        }
+
+        for sameKeyGroups in Dictionary(grouping: groups, by: \.key).values {
+            for leftIndex in sameKeyGroups.indices {
+                for rightIndex in sameKeyGroups.indices where rightIndex > leftIndex {
+                    let left = sameKeyGroups[leftIndex]
+                    let right = sameKeyGroups[rightIndex]
+                    guard left.ownerIndex != right.ownerIndex else { continue }
+                    union(left.id, right.id)
+                }
+            }
+        }
+
+        let fallbackGroupsByName = Dictionary(grouping: groups.filter { !$0.fallbackNameKey.isEmpty }, by: \.fallbackNameKey)
+        for sameNameGroups in fallbackGroupsByName.values {
+            for leftIndex in sameNameGroups.indices {
+                for rightIndex in sameNameGroups.indices where rightIndex > leftIndex {
+                    let left = sameNameGroups[leftIndex]
+                    let right = sameNameGroups[rightIndex]
+                    guard left.ownerIndex != right.ownerIndex,
+                          left.key != right.key,
+                          DrinkProductMatcher.areFallbackBrandsCompatible(left.fallbackBrandKey, right.fallbackBrandKey) else { continue }
+                    union(left.id, right.id)
+                }
+            }
+        }
+
+        let groupsByRoot = Dictionary(grouping: groups, by: { root($0.id) })
+        let canonicalKeyByRoot = groupsByRoot.mapValues { componentGroups in
+            componentGroups
+                .map(\.key)
+                .sorted { first, second in
+                    if first.count == second.count {
+                        return first.localizedStandardCompare(second) == .orderedAscending
+                    }
+                    return first.count < second.count
+                }
+                .first ?? ""
+        }
+
+        return Dictionary(uniqueKeysWithValues: groups.map { group in
+            (group.id, canonicalKeyByRoot[root(group.id)] ?? group.key)
+        })
     }
 
     var body: some View {
+        let owners = comparisonOwners
+        let rows = comparisonRows(owners: owners)
+        let matchedProductCount = rows.count
         ZStack(alignment: .top) {
-            if comparison.pairs.isEmpty {
-                emptyState(title: "还没有共同喝过", subtitle: "你和 \(sharedCompendium.ownerName) 暂时没有双方都记录过的饮品。")
+            if owners.count < 2 || matchedProductCount == 0 {
+                emptyState(title: "还没有共同喝过", subtitle: "至少需要两个人记录过同一款饮品。")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                comparisonLadder
+                comparisonScoreBands(rows: rows, owners: owners)
             }
 
-            header
-                .padding(.horizontal, 14)
+            backButton
+                .padding(.leading, 14)
                 .padding(.top, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(Color(.systemGroupedBackground))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
         .overlay {
-            if let selectedNode {
+            if let selectedEntry {
                 ComparisonDrinkCardOverlay(
-                    node: selectedNode,
-                    pair: selectedPair,
-                    localOwnerName: comparison.localOwnerName,
-                    peerOwnerName: comparison.peerOwnerName,
+                    selectedEntry: selectedEntry,
+                    rows: overlayRows(for: selectedEntry, owners: owners),
                     onClose: {
-                        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
-                            self.selectedNode = nil
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            self.selectedEntry = nil
                         }
                     }
                 )
-                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .transition(.opacity)
                 .zIndex(30)
             }
         }
-        .onChange(of: selectedOwnerID) { _, _ in
-            selectedNode = nil
-            zoomScale = Self.initialZoomScale
-            centerResetToken += 1
+        .overlay {
+            if let focusPickerRow {
+                ComparisonFocusLadderOverlay(
+                    row: focusPickerRow,
+                    highlightedOwnerID: highlightedOwnerID,
+                    onSelect: selectOwnerFromFocusPicker,
+                    onClose: {
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            self.focusPickerRow = nil
+                        }
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(40)
+            }
         }
     }
 
-    private var comparisonLadder: some View {
-        GeometryReader { proxy in
-            let layoutKey = layoutCacheKey(viewport: proxy.size)
-            let layout = layoutCache.snapshot(for: layoutKey) {
-                let canvasSize = canvasSize(for: proxy.size)
-                let metrics = ComparisonLadderMetrics(
-                    size: canvasSize,
-                    topClearance: Self.ladderTopControlClearance + Self.ladderCanvasVerticalSafePadding,
-                    bottomClearance: Self.ladderBottomControlClearance + Self.ladderCanvasVerticalSafePadding
-                )
-                return ComparisonLadderLayoutSnapshot(
-                    canvasSize: canvasSize,
-                    metrics: metrics,
-                    nodes: nodeEntries(metrics: metrics),
-                    connections: connectionEntries(metrics: metrics),
-                    contentSignature: layoutKey
-                )
-            }
+    private func comparisonScoreBands(rows: [ComparisonSharedDrinkRow], owners: [ComparisonOwnerColumn]) -> some View {
+        let selectedProductKey = selectedEntry?.node.productKey
+        let highlightedOwner = owners.enumerated()
+            .first { $0.element.id == highlightedOwnerID }
+            .map { (index: $0.offset, owner: $0.element) }
 
-            ZoomableComparisonLadderView(
-                zoomScale: $zoomScale,
-                contentSize: layout.canvasSize,
-                metrics: layout.metrics,
-                nodes: layout.nodes,
-                connections: layout.connections,
-                selectedNodeID: selectedNode?.id,
-                selectedPairID: selectedPair?.id,
-                contentSignature: layout.contentSignature,
-                centerResetToken: centerResetToken,
-                onTapNode: { node in
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    withAnimation(.spring(response: 0.26, dampingFraction: 0.86)) {
-                        selectedNode = node
+        return ScrollView {
+            LazyVStack(spacing: 0) {
+                ComparisonOverviewMapView(
+                    rows: rows,
+                    participantCount: owners.count,
+                    selectedProductKey: selectedProductKey,
+                    onSelect: selectComparisonRow
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 62)
+                .padding(.bottom, 8)
+
+                if let highlightedOwner {
+                    ComparisonOwnerFocusStatus(
+                        ownerName: highlightedOwner.owner.name,
+                        color: ComparisonOwnerPalette.activeScorePointColor(index: highlightedOwner.index)
+                    ) {
+                        setHighlightedOwner(nil)
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
                 }
-            )
-            // Switching the compared owner replaces the canvas, not merely its
-            // pixels. Give it a fresh native scroll view so no offset, inset,
-            // or gesture state leaks across compendiums.
-            .id(layout.contentSignature)
-            .background(Color(.systemGroupedBackground))
-            .accessibilityLabel("图鉴对比天梯")
+
+                ForEach(rows) { row in
+                    ComparisonSharedDrinkRowView(
+                        row: row,
+                        isSelected: selectedProductKey == row.productKey,
+                        highlightedOwnerID: highlightedOwnerID,
+                        onFocusPick: {
+                            presentFocusPicker(for: row)
+                        },
+                        onTap: {
+                            selectComparisonRow(row)
+                        }
+                    )
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 16)
+        }
+        .scrollIndicators(.hidden)
+        .background(Color(.systemBackground))
+        .accessibilityLabel("共饮评分带")
+    }
+
+    private func selectComparisonRow(_ row: ComparisonSharedDrinkRow) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeOut(duration: 0.12)) {
+            selectedEntry = row.selectedEntry
         }
     }
 
-    private var header: some View {
-        VStack(spacing: 9) {
-            HStack(spacing: 10) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 15, weight: .black))
-                        .foregroundStyle(.primary)
-                        .frame(width: 34, height: 34)
-                        .background(Color.black.opacity(0.055))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-
-                Menu {
-                    ForEach(sharedCompendiums) { compendium in
-                        Button {
-                            selectedOwnerID = compendium.ownerID
-                        } label: {
-                            HStack {
-                                Text(compendium.ownerName)
-                                if compendium.ownerID == selectedOwnerID {
-                                    Spacer()
-                                    Text("当前")
-                                }
-                            }
-                        }
-                    }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 5) {
-                            Text("\(comparison.localOwnerName) × \(comparison.peerOwnerName)")
-                                .font(.headline.weight(.black))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9, weight: .black))
-                                .foregroundStyle(.secondary)
-                        }
-                        Text("共同 \(comparison.matchedCount) · 可切换共饮对象")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-
-                Spacer(minLength: 8)
-                Button {
-                    zoomScale = Self.initialZoomScale
-                    centerResetToken += 1
-                } label: {
-                    Image(systemName: "scope")
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 34, height: 32)
-                        .background(Color.black.opacity(0.055))
-                        .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
+    private func setHighlightedOwner(_ ownerID: String?) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeOut(duration: 0.12)) {
+            highlightedOwnerID = ownerID
         }
-        .padding(12)
-        .background(.white.opacity(0.96))
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(.black.opacity(0.1), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.08), radius: 12, y: 6)
-        .frame(maxWidth: 560)
+    }
+
+    private func presentFocusPicker(for row: ComparisonSharedDrinkRow) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeOut(duration: 0.12)) {
+            focusPickerRow = row
+        }
+    }
+
+    private func selectOwnerFromFocusPicker(_ ownerID: String) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        withAnimation(.easeOut(duration: 0.12)) {
+            highlightedOwnerID = ownerID
+            focusPickerRow = nil
+        }
+    }
+
+    private var backButton: some View {
+        Button {
+            dismiss()
+        } label: {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 15, weight: .black))
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color(.systemBackground).opacity(0.92))
+                .clipShape(Circle())
+                .overlay(
+                    Circle()
+                        .stroke(.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("返回")
     }
 
     private func emptyState(title: String, subtitle: String) -> some View {
@@ -239,880 +362,1442 @@ struct CompendiumComparisonView: View {
         }
     }
 
-    private func layoutCacheKey(viewport: CGSize) -> String {
-        let viewportKey = "\(Int(viewport.width.rounded()))x\(Int(viewport.height.rounded()))"
-        let nodeKey = (visibleLocalNodes + visiblePeerNodes).map { node in
-            [
-                node.id,
-                String(format: "%.3f", node.aggregateRating),
-                "\(node.totalCupCount)",
-                node.representative.stickerImageName ?? node.representative.stickerFileURL?.lastPathComponent ?? ""
-            ].joined(separator: "#")
-        }.joined(separator: "|")
-        return "\(sharedCompendium.ownerID):matched-only:overview-layout-v1:\(viewportKey):\(nodeKey)"
+    private func comparisonRows(owners: [ComparisonOwnerColumn]) -> [ComparisonSharedDrinkRow] {
+        let productKeys = Set(owners.flatMap { $0.nodes.map(\.productKey) })
+        return productKeys.compactMap { productKey in
+            let participants = owners.enumerated().compactMap { ownerIndex, owner -> ComparisonParticipantScore? in
+                guard let node = owner.nodes.first(where: { $0.productKey == productKey }) else { return nil }
+                let entry = comparisonEntry(
+                    node: node,
+                    owner: owner,
+                    ownerIndex: ownerIndex
+                )
+                return ComparisonParticipantScore(
+                    id: entry.id,
+                    ownerID: owner.id,
+                    ownerIndex: ownerIndex,
+                    ownerName: owner.name,
+                    rating: node.aggregateRating,
+                    color: ComparisonOwnerPalette.activeScorePointColor(index: ownerIndex),
+                    node: node,
+                    entry: entry
+                )
+            }
+            guard participants.count >= 2,
+                  let representative = participants.first?.node else {
+                return nil
+            }
+            let ratings = participants.map(\.rating)
+            let average = ratings.reduce(0, +) / Double(ratings.count)
+            let standardDeviation = ratingStandardDeviation(ratings: ratings, average: average)
+            let lowest = ratings.min() ?? average
+            let highest = ratings.max() ?? average
+            return ComparisonSharedDrinkRow(
+                id: productKey,
+                productKey: productKey,
+                displayBrand: representative.displayBrand,
+                displayName: representative.displayName,
+                representative: representative.representative,
+                participants: participants,
+                averageRating: average,
+                lowestRating: lowest,
+                highestRating: highest,
+                ratingStandardDeviation: standardDeviation,
+                totalCupCount: participants.reduce(0) { $0 + $1.node.totalCupCount },
+                selectedEntry: participants[0].entry
+            )
+        }
+        .sorted { first, second in
+            if abs(first.averageRating - second.averageRating) > 0.0001 {
+                return first.averageRating > second.averageRating
+            }
+            if abs(first.ratingStandardDeviation - second.ratingStandardDeviation) > 0.0001 {
+                return first.ratingStandardDeviation > second.ratingStandardDeviation
+            }
+            let nameComparison = first.displayName.localizedStandardCompare(second.displayName)
+            if nameComparison != .orderedSame {
+                return nameComparison == .orderedAscending
+            }
+            return first.displayBrand.localizedStandardCompare(second.displayBrand) == .orderedAscending
+        }
     }
 
-    private func canvasSize(for viewport: CGSize) -> CGSize {
-        let count = CGFloat(max(visibleLocalNodes.count, visiblePeerNodes.count, 1))
-        let overviewWidth = viewport.width / Self.initialZoomScale * 0.98
-        let overviewHeight = viewport.height / Self.initialZoomScale * 0.98
-        let densityHeight = 940 + count * 11 + Self.ladderCanvasVerticalSafePadding * 2
-        return CGSize(
-            width: max(overviewWidth, 1040),
-            height: max(overviewHeight, densityHeight)
+    private func ratingStandardDeviation(ratings: [Double], average: Double) -> Double {
+        guard !ratings.isEmpty else { return 0 }
+        let variance = ratings.reduce(0) { partial, rating in
+            let delta = rating - average
+            return partial + delta * delta
+        } / Double(ratings.count)
+        return sqrt(variance)
+    }
+
+    private func comparisonEntry(
+        node: ComparisonDrinkNode,
+        owner: ComparisonOwnerColumn,
+        ownerIndex: Int
+    ) -> ComparisonLadderNodeEntry {
+        ComparisonLadderNodeEntry(
+            id: node.id,
+            node: node,
+            position: .zero,
+            ownerID: owner.id,
+            ownerIndex: ownerIndex,
+            ownerName: owner.name,
+            clusterID: "\(owner.id)-\(node.productKey)",
+            clusterCount: 1,
+            clusterIndex: 0,
+            isClusterExpanded: true,
+            isClusterRepresentative: true,
+            accessibilityLabel: "\(owner.name)，\(node.displayBrand)，\(node.displayName)，评分 \(String(format: "%.2f", node.aggregateRating))"
         )
     }
 
-    private func nodeEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderNodeEntry] {
-        let local = entries(for: visibleLocalNodes, side: .local, metrics: metrics)
-        let peer = entries(for: visiblePeerNodes, side: .peer, metrics: metrics)
-        return (local + peer).sorted { first, second in
-            if first.position.y == second.position.y {
-                return first.node.id < second.node.id
+    private func makeNode(
+        owner: ComparisonOwnerSource,
+        key: String,
+        items: [LadderDrinkDisplayItem]
+    ) -> ComparisonDrinkNode {
+        let sortedItems = items.sorted { first, second in
+            if first.consumedAt == second.consumedAt {
+                return first.createdAt > second.createdAt
             }
-            return first.position.y < second.position.y
+            return first.consumedAt > second.consumedAt
+        }
+        let totalCupCount = sortedItems.reduce(0) { $0 + max(1, $1.cupCount) }
+        let weightedScore = sortedItems.reduce(0) { partial, item in
+            partial + item.rating * Double(max(1, item.cupCount))
+        }
+        let aggregateRating = totalCupCount > 0 ? weightedScore / Double(totalCupCount) : (sortedItems.first?.rating ?? 0)
+        let representative = sortedItems.first ?? items[0]
+        return ComparisonDrinkNode(
+            id: "\(owner.id)-\(key)",
+            side: owner.isLocal ? .local : .peer,
+            productKey: key,
+            representative: representative,
+            items: sortedItems,
+            aggregateRating: min(5, max(0, aggregateRating)),
+            totalCupCount: max(1, totalCupCount),
+            consumedCount: sortedItems.count,
+            matchedPairID: nil
+        )
+    }
+}
+
+private enum ComparisonOwnerSource {
+    case local(String)
+    case shared(SharedCompendium)
+
+    var id: String {
+        switch self {
+        case .local:
+            return "local"
+        case .shared(let compendium):
+            return "shared-\(compendium.ownerID)"
         }
     }
 
-    private func entries(
-        for nodes: [ComparisonDrinkNode],
-        side: ComparisonSide,
-        metrics: ComparisonLadderMetrics
-    ) -> [ComparisonLadderNodeEntry] {
-        let grouped = Dictionary(grouping: nodes) { node in
-            Int((node.aggregateRating * 10).rounded())
+    var name: String {
+        switch self {
+        case .local(let name):
+            return name
+        case .shared(let compendium):
+            return compendium.ownerName
         }
-        var entries: [ComparisonLadderNodeEntry] = []
-        let laneDirection: CGFloat = side == .local ? -1 : 1
-        let anchorX = side == .local ? metrics.localAnchorX : metrics.peerAnchorX
-        let columnSpacing: CGFloat = 58
-        let verticalSpacing: CGFloat = 34
-
-        for key in grouped.keys.sorted(by: >) {
-            let rowNodes = (grouped[key] ?? []).sorted { first, second in
-                if first.aggregateRating == second.aggregateRating {
-                    return first.displayName.localizedStandardCompare(second.displayName) == .orderedAscending
-                }
-                return first.aggregateRating > second.aggregateRating
-            }
-            let baseY = yPosition(for: Double(key) / 10, metrics: metrics)
-            for (index, node) in rowNodes.enumerated() {
-                let column = index / 3
-                let rowOffset = CGFloat(index % 3 - 1) * verticalSpacing
-                let position = CGPoint(
-                    x: anchorX + laneDirection * CGFloat(column) * columnSpacing,
-                    y: min(max(metrics.plotTop + 24, baseY + rowOffset), metrics.plotBottom - 24)
-                )
-                let ownerName = side == .local ? comparison.localOwnerName : comparison.peerOwnerName
-                entries.append(ComparisonLadderNodeEntry(
-                    id: node.id,
-                    node: node,
-                    position: position,
-                    ownerName: ownerName,
-                    accessibilityLabel: "\(ownerName)，\(node.displayBrand)，\(node.displayName)，评分 \(String(format: "%.2f", node.aggregateRating))"
-                ))
-            }
-        }
-        return entries
     }
 
-    private func connectionEntries(metrics: ComparisonLadderMetrics) -> [ComparisonLadderConnectionEntry] {
-        let nodeByID = Dictionary(uniqueKeysWithValues: nodeEntries(metrics: metrics).map { ($0.id, $0) })
-        return visiblePairs.compactMap { pair in
-            guard let local = nodeByID[pair.local.id], let peer = nodeByID[pair.peer.id] else { return nil }
-            return ComparisonLadderConnectionEntry(
-                id: pair.id,
-                pair: pair,
-                start: local.position,
-                end: peer.position,
-                color: connectionUIColor(for: pair.id, fallbackKey: pair.productKey, delta: pair.ratingDelta),
-                lineWidth: pair.ratingDelta > 1.5 ? 3.375 : 2.625
+    var isLocal: Bool {
+        if case .local = self { return true }
+        return false
+    }
+}
+
+private struct ComparisonOwnerColumn: Identifiable {
+    let id: String
+    let name: String
+    let nodes: [ComparisonDrinkNode]
+}
+
+private struct RawComparisonProductGroup: Identifiable {
+    let ownerIndex: Int
+    let key: String
+    let items: [LadderDrinkDisplayItem]
+    let representative: LadderDrinkDisplayItem?
+    let fallbackNameKey: String
+    let fallbackBrandKey: String
+
+    var id: String {
+        "\(ownerIndex)#\(key)"
+    }
+}
+
+private enum ComparisonOwnerPalette {
+    private static let localScoreUIColor = UIColor(red: 0.13, green: 0.46, blue: 0.31, alpha: 1)
+    private static let neutralScoreUIColor = UIColor(red: 0.55, green: 0.54, blue: 0.50, alpha: 1)
+    private static let uiColors = [
+        UIColor(red: 0.13, green: 0.46, blue: 0.31, alpha: 1),
+        UIColor(red: 0.52, green: 0.43, blue: 0.32, alpha: 1),
+        UIColor(red: 0.43, green: 0.50, blue: 0.32, alpha: 1),
+        UIColor(red: 0.65, green: 0.40, blue: 0.31, alpha: 1),
+        UIColor(red: 0.62, green: 0.52, blue: 0.30, alpha: 1),
+        UIColor(red: 0.39, green: 0.53, blue: 0.43, alpha: 1),
+        UIColor(red: 0.60, green: 0.45, blue: 0.34, alpha: 1),
+        UIColor(red: 0.49, green: 0.49, blue: 0.31, alpha: 1)
+    ]
+
+    static func uiColor(index: Int) -> UIColor {
+        uiColors[max(0, index) % uiColors.count]
+    }
+
+    static func color(index: Int) -> Color {
+        Color(uiColor(index: index))
+    }
+
+    static var neutralScorePointColor: Color {
+        Color(neutralScoreUIColor)
+    }
+
+    static func activeScorePointColor(index: Int) -> Color {
+        Color(index == 0 ? localScoreUIColor : uiColor(index: index))
+    }
+}
+
+private struct ComparisonSharedDrinkRow: Identifiable {
+    let id: String
+    let productKey: String
+    let displayBrand: String
+    let displayName: String
+    let representative: LadderDrinkDisplayItem
+    let participants: [ComparisonParticipantScore]
+    let averageRating: Double
+    let lowestRating: Double
+    let highestRating: Double
+    let ratingStandardDeviation: Double
+    let totalCupCount: Int
+    let selectedEntry: ComparisonLadderNodeEntry
+}
+
+private struct ComparisonParticipantScore: Identifiable {
+    let id: String
+    let ownerID: String
+    let ownerIndex: Int
+    let ownerName: String
+    let rating: Double
+    let color: Color
+    let node: ComparisonDrinkNode
+    let entry: ComparisonLadderNodeEntry
+}
+
+private enum ComparisonDisagreementBand: String, CaseIterable, Identifiable {
+    case high
+    case moderate
+    case consensus
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .consensus:
+            return "共识"
+        case .moderate:
+            return "小分歧"
+        case .high:
+            return "大分歧"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .consensus:
+            return Color(red: 0.15, green: 0.52, blue: 0.34)
+        case .moderate:
+            return Color(red: 0.82, green: 0.50, blue: 0.13)
+        case .high:
+            return Color(red: 0.74, green: 0.23, blue: 0.21)
+        }
+    }
+
+    static func band(for standardDeviation: Double) -> ComparisonDisagreementBand {
+        switch standardDeviation {
+        case 1.10...:
+            return .high
+        case 0.60..<1.10:
+            return .moderate
+        default:
+            return .consensus
+        }
+    }
+}
+
+private struct ComparisonOverviewMarker: Identifiable {
+    let id: String
+    let row: ComparisonSharedDrinkRow
+    let band: ComparisonDisagreementBand
+    let sequence: Int
+
+    var averageRating: Double {
+        row.averageRating
+    }
+}
+
+private struct ComparisonOverviewMapView: View {
+    let rows: [ComparisonSharedDrinkRow]
+    let participantCount: Int
+    let selectedProductKey: String?
+    let onSelect: (ComparisonSharedDrinkRow) -> Void
+
+    private let labelWidth: CGFloat = 44
+    private let laneHeight: CGFloat = 27
+    private let laneGap: CGFloat = 0
+    private let topInset: CGFloat = 5
+    private let bottomLabelHeight: CGFloat = 18
+
+    private var markers: [ComparisonOverviewMarker] {
+        rows.enumerated().map { index, row in
+            ComparisonOverviewMarker(
+                id: row.id,
+                row: row,
+                band: ComparisonDisagreementBand.band(for: row.ratingStandardDeviation),
+                sequence: index
             )
         }
     }
 
-    private func yPosition(for rating: Double, metrics: ComparisonLadderMetrics) -> CGFloat {
-        metrics.plotTop + CGFloat(5 - min(5, max(0, rating))) / 5 * metrics.plotHeight
-    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .lastTextBaseline, spacing: 10) {
+                Text("共饮对比")
+                    .font(.subheadline.weight(.black))
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .lineLimit(1)
 
-    private func connectionUIColor(for pairID: String?, fallbackKey: String, delta: Double) -> UIColor {
-        let palette = [
-            UIColor.black.withAlphaComponent(0.78),
-            UIColor(red: 0.30, green: 0.22, blue: 0.16, alpha: 1),
-            UIColor(red: 0.44, green: 0.34, blue: 0.24, alpha: 1),
-            UIColor(red: 0.56, green: 0.46, blue: 0.34, alpha: 1),
-            UIColor(red: 0.24, green: 0.28, blue: 0.25, alpha: 1),
-            UIColor(red: 0.36, green: 0.30, blue: 0.27, alpha: 1)
-        ]
-        let seed = (pairID ?? fallbackKey).unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }
-        var color = palette[abs(seed) % palette.count]
-        if delta > 1.5 {
-            color = color.blended(with: UIColor.black, amount: 0.18)
-        } else if delta <= 0.5 {
-            color = color.blended(with: UIColor.white, amount: 0.12)
+                Spacer(minLength: 8)
+
+                Text("\(rows.count) 款共同饮品 · \(participantCount) 人")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            GeometryReader { proxy in
+                let plotLeft = labelWidth
+                let plotWidth = max(1, proxy.size.width - labelWidth)
+                let bottomY = topInset + laneHeight * 3 + laneGap * 2 + 8
+
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(ComparisonDisagreementBand.allCases.enumerated()), id: \.element.id) { index, band in
+                        let centerY = laneCenterY(index: index)
+
+                        Text(band.title)
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(.secondary.opacity(0.86))
+                            .frame(width: labelWidth - 8, alignment: .trailing)
+                            .position(x: (labelWidth - 8) / 2, y: centerY)
+
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(band.color.opacity(0.04))
+                            .frame(width: plotWidth, height: laneHeight)
+                            .position(x: plotLeft + plotWidth / 2, y: centerY)
+
+                        Capsule()
+                            .fill(Color.black.opacity(0.045))
+                            .frame(width: plotWidth, height: 1)
+                            .position(x: plotLeft + plotWidth / 2, y: centerY)
+                    }
+
+                    ForEach([0.0, 2.5, 5.0], id: \.self) { value in
+                        let x = plotLeft + CGFloat(value / 5) * plotWidth
+                        Capsule()
+                            .fill(Color.black.opacity(value == 2.5 ? 0.08 : 0.12))
+                            .frame(width: 1, height: laneHeight * 3 + laneGap * 2)
+                            .position(x: x, y: topInset + (laneHeight * 3 + laneGap * 2) / 2)
+
+                        Text(axisLabel(for: value))
+                            .font(.system(size: 8, weight: .medium).monospacedDigit())
+                            .foregroundStyle(.secondary.opacity(0.72))
+                            .position(x: x, y: bottomY)
+                    }
+
+                    ForEach(markers) { marker in
+                        let x = plotLeft + CGFloat(clampedRating(marker.averageRating) / 5) * plotWidth
+                        let y = markerY(for: marker)
+                        let isSelected = marker.row.productKey == selectedProductKey
+
+                        ComparisonOverviewMarkerView(
+                            band: marker.band,
+                            isSelected: isSelected
+                        )
+                        .frame(width: 26, height: 26)
+                        .position(x: x, y: y)
+                        .accessibilityLabel("\(marker.row.displayBrand)，\(marker.row.displayName)，均分 \(String(format: "%.2f", marker.averageRating))")
+                    }
+
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onEnded { value in
+                                    guard let row = nearestRow(
+                                        to: value.location,
+                                        plotLeft: plotLeft,
+                                        plotWidth: plotWidth
+                                    ) else { return }
+                                    onSelect(row)
+                                }
+                        )
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+            }
+            .frame(height: overviewHeight)
         }
-        return color
+        .padding(.vertical, 2)
     }
-}
 
-private final class ComparisonLadderLayoutCache: ObservableObject {
-    private var cachedKey: String?
-    private var cachedSnapshot: ComparisonLadderLayoutSnapshot?
+    private var overviewHeight: CGFloat {
+        topInset + laneHeight * 3 + laneGap * 2 + bottomLabelHeight
+    }
 
-    func snapshot(for key: String, build: () -> ComparisonLadderLayoutSnapshot) -> ComparisonLadderLayoutSnapshot {
-        if cachedKey == key, let cachedSnapshot {
-            return cachedSnapshot
+    private func laneCenterY(index: Int) -> CGFloat {
+        topInset + laneHeight / 2 + CGFloat(index) * (laneHeight + laneGap)
+    }
+
+    private func laneIndex(for band: ComparisonDisagreementBand) -> Int {
+        ComparisonDisagreementBand.allCases.firstIndex(of: band) ?? 0
+    }
+
+    private func markerY(for marker: ComparisonOverviewMarker) -> CGFloat {
+        let offsets: [CGFloat] = [-3.5, 2.5, 0, -1.5, 3.5]
+        return laneCenterY(index: laneIndex(for: marker.band)) + offsets[marker.sequence % offsets.count]
+    }
+
+    private func nearestRow(to location: CGPoint, plotLeft: CGFloat, plotWidth: CGFloat) -> ComparisonSharedDrinkRow? {
+        guard location.x >= plotLeft - 12 else { return nil }
+        let weightedCandidates = markers.map { marker in
+            let x = plotLeft + CGFloat(clampedRating(marker.averageRating) / 5) * plotWidth
+            let y = markerY(for: marker)
+            let dx = location.x - x
+            let dy = (location.y - y) * 1.6
+            return (row: marker.row, distance: dx * dx + dy * dy)
         }
-        let snapshot = build()
-        cachedKey = key
-        cachedSnapshot = snapshot
-        return snapshot
+        return weightedCandidates.min { $0.distance < $1.distance }?.row
+    }
+
+    private func axisLabel(for value: Double) -> String {
+        value == 2.5 ? "2.5" : String(format: "%.0f", value)
+    }
+
+    private func clampedRating(_ rating: Double) -> Double {
+        min(5, max(0, rating))
     }
 }
 
-private struct ComparisonLadderLayoutSnapshot {
-    let canvasSize: CGSize
-    let metrics: ComparisonLadderMetrics
-    let nodes: [ComparisonLadderNodeEntry]
-    let connections: [ComparisonLadderConnectionEntry]
-    let contentSignature: String
+private struct ComparisonOverviewMarkerView: View {
+    let band: ComparisonDisagreementBand
+    let isSelected: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(isSelected ? band.color.opacity(0.84) : band.color.opacity(0.08))
+                .frame(width: isSelected ? 13 : 9, height: isSelected ? 13 : 9)
+                .overlay(
+                    Circle()
+                        .stroke(
+                            isSelected ? band.color.opacity(0.92) : band.color.opacity(0.28),
+                            lineWidth: isSelected ? 1.2 : 0.8
+                        )
+                )
+
+            Circle()
+                .fill(isSelected ? Color(.systemBackground).opacity(0.92) : ComparisonOwnerPalette.neutralScorePointColor.opacity(0.48))
+                .frame(width: isSelected ? 3.4 : 3, height: isSelected ? 3.4 : 3)
+        }
+    }
 }
 
-private struct ComparisonLadderMetrics {
-    let size: CGSize
-    let topClearance: CGFloat
-    let plotTop: CGFloat
-    let plotBottom: CGFloat
-    let centerX: CGFloat
-    let localAnchorX: CGFloat
-    let peerAnchorX: CGFloat
-    let axisLineGap: CGFloat = 82
+private struct ComparisonOwnerFocusStatus: View {
+    let ownerName: String
+    let color: Color
+    let onClear: () -> Void
 
-    init(size: CGSize, topClearance: CGFloat, bottomClearance: CGFloat = 42) {
-        self.size = size
-        self.topClearance = topClearance
-        plotTop = topClearance
-        plotBottom = max(topClearance + 1, size.height - bottomClearance)
-        centerX = size.width / 2
-        localAnchorX = centerX - min(250, max(154, size.width * 0.22))
-        peerAnchorX = centerX + min(250, max(154, size.width * 0.22))
+    var body: some View {
+        HStack {
+            Button(action: onClear) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(color.opacity(0.92))
+                        .frame(width: 8, height: 8)
+                        .overlay(
+                            Circle()
+                                .stroke(Color(.systemBackground).opacity(0.95), lineWidth: 1)
+                        )
+
+                    Text("聚焦：\(ownerName)")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Color.primary.opacity(0.88))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .black))
+                        .foregroundStyle(color.opacity(0.76))
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .frame(maxWidth: 190, alignment: .leading)
+                .background(color.opacity(0.08))
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(color.opacity(0.22), lineWidth: 0.8)
+                )
+            }
+            .buttonStyle(.plain)
+            Spacer(minLength: 0)
+        }
+        .accessibilityLabel("正在高亮 \(ownerName)，轻点取消")
+    }
+}
+
+private struct ComparisonFocusLadderOverlay: View {
+    let row: ComparisonSharedDrinkRow
+    let highlightedOwnerID: String?
+    let onSelect: (String) -> Void
+    let onClose: () -> Void
+
+    private static let topClearance: CGFloat = 118
+    private static let bottomClearance: CGFloat = 30
+
+    private var sortedParticipants: [ComparisonParticipantScore] {
+        row.participants.sorted { first, second in
+            if abs(first.rating - second.rating) > 0.0001 {
+                return first.rating > second.rating
+            }
+            return first.ownerIndex < second.ownerIndex
+        }
     }
 
-    var plotHeight: CGFloat {
-        max(1, plotBottom - plotTop)
+    var body: some View {
+        GeometryReader { proxy in
+            let width = min(proxy.size.width - 28, 430)
+            let maxHeight = max(260, proxy.size.height - Self.topClearance - Self.bottomClearance)
+
+            ZStack {
+                Color.black.opacity(0.12)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onClose)
+
+                VStack(alignment: .leading, spacing: 12) {
+                    header
+
+                    ScrollView {
+                        LazyVStack(spacing: 5) {
+                            ForEach(sortedParticipants) { participant in
+                                ComparisonFocusLadderRow(
+                                    participant: participant,
+                                    isFocused: highlightedOwnerID == participant.ownerID
+                                ) {
+                                    onSelect(participant.ownerID)
+                                }
+                            }
+                        }
+                        .padding(.bottom, 2)
+                    }
+                    .scrollIndicators(.hidden)
+                }
+                .padding(14)
+                .frame(width: width)
+                .frame(maxHeight: maxHeight, alignment: .top)
+                .background(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(.black.opacity(0.08), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.16), radius: 24, y: 14)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, Self.topClearance)
+                .onTapGesture {}
+            }
+        }
     }
+
+    private var header: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("选择要追踪的人")
+                    .font(.subheadline.weight(.black))
+                    .foregroundStyle(.primary)
+                Text(row.displayName)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 10)
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.primary.opacity(0.82))
+                    .frame(width: 28, height: 28)
+                    .background(Color.black.opacity(0.055))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+private struct ComparisonFocusLadderRow: View {
+    let participant: ComparisonParticipantScore
+    let isFocused: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(participant.color.opacity(0.92))
+                    .frame(width: 10, height: 10)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(.systemBackground).opacity(0.95), lineWidth: 1)
+                    )
+
+                Text(participant.ownerName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.88))
+                    .lineLimit(1)
+                    .frame(width: 74, alignment: .leading)
+
+                ComparisonFocusLadderTrack(
+                    rating: participant.rating,
+                    color: participant.color,
+                    isFocused: isFocused
+                )
+                .frame(height: 22)
+
+                Text(String(format: "%.2f", participant.rating))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(isFocused ? participant.color.opacity(0.95) : Color.primary.opacity(0.72))
+                    .frame(width: 34, alignment: .trailing)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 44)
+            .background(isFocused ? participant.color.opacity(0.08) : Color.black.opacity(0.025))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isFocused ? participant.color.opacity(0.24) : Color.black.opacity(0.045), lineWidth: 0.8)
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("追踪 \(participant.ownerName)，评分 \(String(format: "%.2f", participant.rating))")
+    }
+}
+
+private struct ComparisonFocusLadderTrack: View {
+    let rating: Double
+    let color: Color
+    let isFocused: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width)
+            let pointSize: CGFloat = isFocused ? 10 : 8
+            let trackStart = pointSize / 2
+            let trackWidth = max(1, width - pointSize)
+            let centerY = proxy.size.height / 2
+            let x = trackStart + CGFloat(min(5, max(0, rating))) / 5 * trackWidth
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.black.opacity(0.055))
+                    .frame(width: trackWidth, height: 1.2)
+                    .position(x: trackStart + trackWidth / 2, y: centerY)
+
+                ForEach([0, 1, 2, 3, 4, 5], id: \.self) { score in
+                    Circle()
+                        .fill(Color.black.opacity(score == 0 || score == 5 ? 0.14 : 0.08))
+                        .frame(width: score == 0 || score == 5 ? 2.1 : 1.5, height: score == 0 || score == 5 ? 2.1 : 1.5)
+                        .position(x: trackStart + CGFloat(score) / 5 * trackWidth, y: centerY)
+                }
+
+                Circle()
+                    .fill(color.opacity(isFocused ? 0.96 : 0.78))
+                    .frame(width: pointSize, height: pointSize)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(.systemBackground).opacity(0.96), lineWidth: 1.1)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(color.opacity(isFocused ? 0.40 : 0.18), lineWidth: 0.8)
+                    )
+                    .position(x: x, y: centerY)
+            }
+            .frame(width: width, height: proxy.size.height)
+        }
+    }
+}
+
+private struct ComparisonSharedDrinkRowView: View {
+    let row: ComparisonSharedDrinkRow
+    let isSelected: Bool
+    let highlightedOwnerID: String?
+    let onFocusPick: () -> Void
+    let onTap: () -> Void
+
+    private var standardDeviationColor: Color {
+        ComparisonDisagreementBand.band(for: row.ratingStandardDeviation).color
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.displayName)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(row.displayBrand)
+                        .font(.system(size: 8.8, weight: .medium))
+                        .foregroundStyle(.secondary.opacity(0.86))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Text(String(format: "%.2f", row.averageRating))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                    .foregroundStyle(isSelected ? standardDeviationColor.opacity(0.88) : Color.primary.opacity(0.74))
+                    .frame(width: 34, alignment: .trailing)
+            }
+
+            ComparisonScoreBandView(
+                participants: row.participants,
+                averageRating: row.averageRating,
+                lowestRating: row.lowestRating,
+                highestRating: row.highestRating,
+                standardDeviationColor: standardDeviationColor,
+                isSelected: isSelected,
+                highlightedOwnerID: highlightedOwnerID
+            )
+            .frame(height: isSelected || highlightedOwnerID != nil ? 22 : 18)
+        }
+        .padding(.vertical, 3.5)
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(rowBackground)
+        .overlay(alignment: .leading) {
+            if isSelected {
+                Capsule()
+                    .fill(standardDeviationColor.opacity(0.84))
+                    .frame(width: 2, height: 30)
+                    .offset(x: -7)
+            }
+        }
+        .onTapGesture(perform: onTap)
+        .onLongPressGesture(minimumDuration: 0.35, perform: onFocusPick)
+        .accessibilityLabel("\(row.displayBrand)，\(row.displayName)，均分 \(String(format: "%.2f", row.averageRating))，标准差 \(String(format: "%.2f", row.ratingStandardDeviation))")
+    }
+
+    @ViewBuilder
+    private var rowBackground: some View {
+        if isSelected {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(standardDeviationColor.opacity(0.045))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(standardDeviationColor.opacity(0.14), lineWidth: 0.8)
+                )
+        } else {
+            Color.clear
+        }
+    }
+
+    static func standardDeviationColor(for standardDeviation: Double) -> Color {
+        ComparisonDisagreementBand.band(for: standardDeviation).color
+    }
+}
+
+private struct ComparisonScoreBandView: View {
+    let participants: [ComparisonParticipantScore]
+    let averageRating: Double
+    let lowestRating: Double
+    let highestRating: Double
+    let standardDeviationColor: Color
+    let isSelected: Bool
+    let highlightedOwnerID: String?
+
+    private let clusterThreshold: CGFloat = 0.18
+
+    private var pointSize: CGFloat {
+        isSelected || highlightedOwnerID != nil ? 10 : 8
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width)
+            let trackStart = pointSize / 2
+            let trackWidth = max(1, width - pointSize)
+            let centerY = proxy.size.height * 0.50
+            let pointGroups = scorePointGroups(width: width)
+            let lowX = trackStart + CGFloat(clampedRating(lowestRating)) / 5 * trackWidth
+            let highX = trackStart + CGFloat(clampedRating(highestRating)) / 5 * trackWidth
+            let rangeWidth = max(4, highX - lowX)
+            let neutralColor = ComparisonOwnerPalette.neutralScorePointColor
+
+            ZStack(alignment: .leading) {
+                if isSelected {
+                    Capsule()
+                        .fill(standardDeviationColor.opacity(0.08))
+                        .frame(width: rangeWidth + 12, height: 10)
+                        .position(x: (lowX + highX) / 2, y: centerY)
+                        .blur(radius: 3)
+                }
+
+                Capsule()
+                    .fill(Color.black.opacity(isSelected ? 0.075 : 0.045))
+                    .frame(width: trackWidth, height: 1.2)
+                    .position(x: trackStart + trackWidth / 2, y: centerY)
+
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                rangeColor.opacity(isSelected ? 0.08 : 0.06),
+                                rangeColor.opacity(isSelected ? 0.58 : 0.18),
+                                rangeColor.opacity(isSelected ? 0.08 : 0.06)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: rangeWidth, height: 2.2)
+                    .position(x: (lowX + highX) / 2, y: centerY)
+
+                ForEach([0, 1, 2, 3, 4, 5], id: \.self) { score in
+                    Circle()
+                        .fill(Color.black.opacity(score == 0 || score == 5 ? 0.16 : 0.09))
+                        .frame(width: score == 0 || score == 5 ? 2.2 : 1.6, height: score == 0 || score == 5 ? 2.2 : 1.6)
+                        .position(x: trackStart + CGFloat(score) / 5 * trackWidth, y: centerY)
+                }
+
+                Capsule()
+                    .fill(rangeColor.opacity(isSelected ? 0.78 : 0.22))
+                    .frame(width: isSelected ? 1.4 : 1, height: isSelected ? 11 : 8)
+                    .position(x: trackStart + CGFloat(clampedRating(averageRating)) / 5 * trackWidth, y: centerY)
+
+                ForEach(pointGroups) { group in
+                    if group.isAggregate {
+                        AggregateScorePointView(
+                            participants: group.participants,
+                            isSelected: isSelected,
+                            highlightedOwnerID: highlightedOwnerID
+                        )
+                            .position(x: group.x, y: centerY)
+                            .accessibilityLabel(aggregateAccessibilityLabel(for: group))
+                    } else if let participant = group.participants.first {
+                        let isOwnerFocused = highlightedOwnerID == participant.ownerID
+                        let shouldUseActiveColor = isSelected || isOwnerFocused
+                        let pointColor = shouldUseActiveColor ? participant.color : neutralColor
+                        let pointOpacity = pointOpacity(isOwnerFocused: isOwnerFocused)
+                        let pointDiameter = pointDiameter(isOwnerFocused: isOwnerFocused)
+                        ZStack {
+                            if isSelected || isOwnerFocused {
+                                Circle()
+                                    .stroke(pointColor.opacity(isOwnerFocused ? 0.30 : 0.20), lineWidth: isOwnerFocused ? 3.4 : 3)
+                                    .frame(width: pointDiameter + 4.5, height: pointDiameter + 4.5)
+                            }
+
+                            Circle()
+                                .fill(pointColor.opacity(pointOpacity))
+                                .frame(width: pointDiameter, height: pointDiameter)
+                                .overlay(
+                                    Circle()
+                                        .stroke(Color(.systemBackground).opacity(0.96), lineWidth: isOwnerFocused ? 1.4 : 1.2)
+                                )
+                                .overlay(
+                                    Circle()
+                                        .stroke(pointColor.opacity(isSelected || isOwnerFocused ? 0.42 : 0.12), lineWidth: isOwnerFocused ? 1 : 0.8)
+                                )
+                        }
+                        .shadow(color: pointColor.opacity(isSelected || isOwnerFocused ? 0.14 : 0), radius: 2, y: 0.6)
+                        .position(x: group.x, y: centerY + group.yOffset)
+                        .accessibilityLabel("\(participant.ownerName) 评分 \(String(format: "%.2f", participant.rating))")
+                    }
+                }
+            }
+            .frame(width: width, height: proxy.size.height)
+        }
+    }
+
+    private var rangeColor: Color {
+        isSelected ? standardDeviationColor : ComparisonOwnerPalette.neutralScorePointColor
+    }
+
+    private func pointOpacity(isOwnerFocused: Bool) -> Double {
+        if isOwnerFocused { return 0.96 }
+        if highlightedOwnerID != nil { return 0.24 }
+        return isSelected ? 0.92 : 0.62
+    }
+
+    private func pointDiameter(isOwnerFocused: Bool) -> CGFloat {
+        if isOwnerFocused { return 11 }
+        if highlightedOwnerID != nil { return 7 }
+        return pointSize
+    }
+
+    private func scorePointGroups(width: CGFloat) -> [ScorePointGroup] {
+        let sorted = participants.sorted {
+            if abs($0.rating - $1.rating) > 0.0001 {
+                return $0.rating < $1.rating
+            }
+            return $0.ownerIndex < $1.ownerIndex
+        }
+        var clusters: [[ComparisonParticipantScore]] = []
+        for participant in sorted {
+            if let lastCluster = clusters.last,
+               let anchor = lastCluster.first,
+               abs(participant.rating - anchor.rating) <= clusterThreshold {
+                clusters[clusters.count - 1].append(participant)
+            } else {
+                clusters.append([participant])
+            }
+        }
+
+        return clusters.flatMap { cluster in
+            if cluster.count >= 4 {
+                let averageRating = cluster.map(\.rating).reduce(0, +) / Double(cluster.count)
+                let markerWidth = aggregatePointWidth(for: cluster.count)
+                let rawX = pointSize / 2 + CGFloat(clampedRating(averageRating)) / 5 * max(1, width - pointSize)
+                return [
+                    ScorePointGroup(
+                        id: cluster.map(\.id).joined(separator: "-"),
+                        participants: cluster,
+                        x: min(width - markerWidth / 2, max(markerWidth / 2, rawX)),
+                        yOffset: 0,
+                        isAggregate: true
+                    )
+                ]
+            }
+            let offsets = verticalOffsets(for: cluster.count)
+            return cluster.enumerated().map { index, participant in
+                ScorePointGroup(
+                    id: participant.id,
+                    participants: [participant],
+                    x: pointSize / 2 + CGFloat(clampedRating(participant.rating)) / 5 * max(1, width - pointSize),
+                    yOffset: offsets[index],
+                    isAggregate: false
+                )
+            }
+        }
+    }
+
+    private func verticalOffsets(for count: Int) -> [CGFloat] {
+        switch count {
+        case 0, 1:
+            return [0]
+        case 2:
+            return [-4.5, 4.5]
+        case 3:
+            return [-5, 0, 5]
+        case 4:
+            return [-6, -2, 2, 6]
+        default:
+            let center = CGFloat(count - 1) / 2
+            return (0..<count).map { (CGFloat($0) - center) * 3.6 }
+        }
+    }
+
+    private func clampedRating(_ rating: Double) -> Double {
+        min(5, max(0, rating))
+    }
+
+    private func aggregatePointWidth(for count: Int) -> CGFloat {
+        AggregateScorePointView.width(for: count)
+    }
+
+    private func aggregateAccessibilityLabel(for group: ScorePointGroup) -> String {
+        let names = group.participants.map(\.ownerName).joined(separator: "、")
+        let rating = group.participants.first?.rating ?? 0
+        return "\(group.participants.count) 人评分约 \(String(format: "%.2f", rating))：\(names)"
+    }
+}
+
+private struct AggregateScorePointView: View {
+    let participants: [ComparisonParticipantScore]
+    let isSelected: Bool
+    let highlightedOwnerID: String?
+
+    private var width: CGFloat {
+        Self.width(for: participants.count)
+    }
+
+    private var containsFocusedOwner: Bool {
+        guard let highlightedOwnerID else { return false }
+        return participants.contains { $0.ownerID == highlightedOwnerID }
+    }
+
+    private var primaryColor: Color {
+        if let focusedParticipant = participants.first(where: { $0.ownerID == highlightedOwnerID }) {
+            return focusedParticipant.color
+        }
+        return ComparisonOwnerPalette.neutralScorePointColor
+    }
+
+    static func width(for count: Int) -> CGFloat {
+        min(26, max(18, CGFloat(count) * 2.4 + 9))
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            Capsule()
+                .fill(Color(.systemBackground).opacity(isSelected || containsFocusedOwner ? 0.96 : 0.86))
+                .overlay(
+                    Capsule()
+                        .stroke(
+                            containsFocusedOwner ? primaryColor.opacity(0.34) : Color.black.opacity(isSelected ? 0.12 : 0.08),
+                            lineWidth: containsFocusedOwner ? 1.1 : 0.7
+                        )
+                )
+
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: participantStripeColors,
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+            .frame(height: 1.6)
+            .clipShape(Capsule())
+
+            Text("\(participants.count)")
+                .font(.system(size: 7.2, weight: .semibold, design: .rounded).monospacedDigit())
+                .foregroundStyle(containsFocusedOwner ? primaryColor.opacity(0.92) : Color.primary.opacity(0.82))
+                .offset(y: -2.2)
+        }
+        .frame(width: width, height: 12)
+    }
+
+    private var participantStripeColors: [Color] {
+        if let highlightedOwnerID {
+            guard let focusedParticipant = participants.first(where: { $0.ownerID == highlightedOwnerID }) else {
+                return [ComparisonOwnerPalette.neutralScorePointColor.opacity(0.18)]
+            }
+            return [focusedParticipant.color.opacity(0.82)]
+        }
+        guard isSelected else {
+            return [ComparisonOwnerPalette.neutralScorePointColor.opacity(0.38)]
+        }
+        let colors = participants.prefix(6).map { $0.color.opacity(0.74) }
+        return colors.isEmpty ? [Color.black.opacity(0.14)] : colors
+    }
+}
+
+private struct ScorePointGroup: Identifiable {
+    let id: String
+    let participants: [ComparisonParticipantScore]
+    let x: CGFloat
+    let yOffset: CGFloat
+    let isAggregate: Bool
 }
 
 private struct ComparisonLadderNodeEntry {
     let id: String
     let node: ComparisonDrinkNode
     let position: CGPoint
+    let ownerID: String
+    let ownerIndex: Int
     let ownerName: String
+    let clusterID: String
+    let clusterCount: Int
+    let clusterIndex: Int
+    let isClusterExpanded: Bool
+    let isClusterRepresentative: Bool
     let accessibilityLabel: String
 }
 
-private struct ComparisonLadderConnectionEntry {
+private struct ComparisonOverlayRow: Identifiable {
     let id: String
-    let pair: ComparisonDrinkPair
-    let start: CGPoint
-    let end: CGPoint
-    let color: UIColor
-    let lineWidth: CGFloat
+    let ownerName: String
+    let node: ComparisonDrinkNode?
+    let accent: Color
+    let isFocused: Bool
 }
 
-private struct ZoomableComparisonLadderView: UIViewRepresentable {
-    @Binding var zoomScale: CGFloat
-    let contentSize: CGSize
-    let metrics: ComparisonLadderMetrics
-    let nodes: [ComparisonLadderNodeEntry]
-    let connections: [ComparisonLadderConnectionEntry]
-    let selectedNodeID: String?
-    let selectedPairID: String?
-    let contentSignature: String
-    let centerResetToken: Int
-    let onTapNode: (ComparisonDrinkNode) -> Void
+struct PixelTinyPersonView: View {
+    let profile: PixelPersonProfile
+    var isFocused = false
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(zoomScale: $zoomScale, onTapNode: onTapNode)
-    }
-
-    func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = ZoomCanvasScrollView()
-        let coordinator = context.coordinator
-        scrollView.onLayoutSubviews = { [weak coordinator] in
-            coordinator?.handleScrollViewLayout()
-        }
-        scrollView.delegate = context.coordinator
-        scrollView.pinchGestureRecognizer?.delegate = context.coordinator
-        scrollView.minimumZoomScale = CompendiumComparisonView.minimumZoomScale
-        scrollView.maximumZoomScale = 2.35
-        scrollView.zoomScale = zoomScale
-        scrollView.bouncesZoom = true
-        scrollView.showsHorizontalScrollIndicator = false
-        scrollView.showsVerticalScrollIndicator = false
-        scrollView.backgroundColor = .clear
-        scrollView.contentInsetAdjustmentBehavior = .never
-        scrollView.layer.drawsAsynchronously = true
-
-        let tapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
-        tapGesture.delegate = context.coordinator
-        tapGesture.cancelsTouchesInView = false
-        scrollView.addGestureRecognizer(tapGesture)
-
-        let canvasView = ComparisonLadderCanvasUIView()
-        canvasView.backgroundColor = .clear
-        canvasView.layer.drawsAsynchronously = true
-        canvasView.frame = CGRect(origin: .zero, size: contentSize)
-        canvasView.configure(
-            metrics: metrics,
-            nodes: nodes,
-            connections: connections,
-            contentSize: contentSize,
-            contentSignature: contentSignature,
-            displayScale: zoomScale
-        )
-        canvasView.applyZoom(scale: zoomScale, mode: .settled)
-        canvasView.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
-        scrollView.addSubview(canvasView)
-        scrollView.contentSize = contentSize
-
-        context.coordinator.scrollView = scrollView
-        context.coordinator.canvasView = canvasView
-        context.coordinator.nodes = nodes
-        context.coordinator.contentSize = contentSize
-        context.coordinator.contentSignature = contentSignature
-        context.coordinator.centerResetToken = centerResetToken
-        context.coordinator.viewport.attach(scrollView)
-        context.coordinator.viewport.update(
-            canvasSize: contentSize,
-            focusPoint: CGPoint(
-                x: metrics.centerX,
-                y: (metrics.plotTop + metrics.plotBottom) / 2
+    var body: some View {
+        Canvas { context, size in
+            let unit = max(1, floor(min(size.width / 16, size.height / 19)))
+            let origin = CGPoint(
+                x: floor((size.width - unit * 16) / 2),
+                y: floor((size.height - unit * 19) / 2)
             )
-        )
-        context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
-        return scrollView
-    }
 
-    func updateUIView(_ scrollView: UIScrollView, context: Context) {
-        let contentDidChange = context.coordinator.contentSignature != contentSignature
-        let sizeDidChange = context.coordinator.contentSize != contentSize
-        let centerResetDidChange = context.coordinator.centerResetToken != centerResetToken
+            func rect(_ x: Int, _ y: Int, _ width: Int, _ height: Int, _ color: Color) {
+                let frame = CGRect(
+                    x: origin.x + CGFloat(x) * unit,
+                    y: origin.y + CGFloat(y) * unit,
+                    width: CGFloat(width) * unit,
+                    height: CGFloat(height) * unit
+                )
+                context.fill(Path(frame), with: .color(color))
+            }
 
-        context.coordinator.zoomScale = $zoomScale
-        context.coordinator.nodes = nodes
-        context.coordinator.contentSize = contentSize
-        context.coordinator.viewport.update(
-            canvasSize: contentSize,
-            focusPoint: CGPoint(
-                x: metrics.centerX,
-                y: (metrics.plotTop + metrics.plotBottom) / 2
-            )
-        )
-        if contentDidChange {
-            context.coordinator.contentSignature = contentSignature
-        }
-        if centerResetDidChange {
-            context.coordinator.centerResetToken = centerResetToken
-        }
-        if sizeDidChange {
-            scrollView.contentSize = contentSize
-            context.coordinator.canvasView?.frame = CGRect(origin: .zero, size: contentSize)
-        }
-        let shouldResetViewport = centerResetDidChange || sizeDidChange || contentDidChange
-        if contentDidChange || sizeDidChange {
-            context.coordinator.canvasView?.configure(
-                metrics: metrics,
-                nodes: nodes,
-                connections: connections,
-                contentSize: contentSize,
-                contentSignature: contentSignature,
-                displayScale: shouldResetViewport ? CompendiumComparisonView.initialZoomScale : scrollView.zoomScale
-            )
-            if !centerResetDidChange {
-                context.coordinator.viewport.clampContentOffset()
+            let skin = Color(pixelHex: profile.skinHex)
+            let hair = Color(pixelHex: profile.hairHex)
+            let top = Color(pixelHex: profile.topHex)
+            let bottom = Color(pixelHex: profile.bottomHex)
+            let accent = Color(pixelHex: profile.accentHex)
+            let outline = Color.black.opacity(0.72)
+            let cheek = Color.red.opacity(0.36)
+
+            rect(0, 10, 5, 2, skin)
+            rect(11, 10, 5, 2, skin)
+            rect(1, 11, 3, 1, skin)
+            rect(12, 11, 3, 1, skin)
+
+            rect(5, 13, 6, 3, bottom)
+            rect(6, 12, 4, 2, top)
+            rect(5, 9, 6, 4, top)
+            rect(7, 8, 2, 2, accent)
+
+            rect(5, 16, 2, 2, bottom)
+            rect(9, 16, 2, 2, bottom)
+            rect(4, 18, 3, 1, outline)
+            rect(9, 18, 3, 1, outline)
+
+            rect(5, 4, 6, 6, skin)
+            rect(5, 3, 6, 2, hair)
+            switch profile.hairStyle {
+            case 0:
+                rect(4, 4, 2, 3, hair)
+                rect(10, 4, 1, 2, hair)
+            case 1:
+                rect(4, 4, 7, 2, hair)
+                rect(5, 6, 1, 1, hair)
+            case 2:
+                rect(5, 2, 5, 2, hair)
+                rect(4, 4, 1, 2, hair)
+                rect(10, 4, 1, 3, hair)
+            default:
+                rect(4, 3, 3, 3, hair)
+                rect(8, 3, 3, 2, hair)
+            }
+
+            rect(6, 6, 1, 1, outline)
+            rect(9, 6, 1, 1, outline)
+            switch profile.faceStyle {
+            case 0:
+                rect(7, 8, 2, 1, outline)
+            case 1:
+                rect(7, 8, 1, 1, outline)
+                rect(9, 8, 1, 1, outline)
+            default:
+                rect(7, 8, 2, 1, cheek)
+            }
+
+            switch profile.accessoryStyle {
+            case 0:
+                rect(11, 6, 2, 1, accent)
+                rect(12, 7, 1, 2, accent)
+            case 1:
+                rect(4, 6, 1, 1, accent)
+                rect(11, 6, 1, 1, accent)
+            case 2:
+                rect(7, 2, 2, 1, accent)
+            default:
+                rect(11, 9, 2, 3, accent)
+                rect(12, 8, 1, 1, Color.white.opacity(0.88))
+            }
+
+            if isFocused {
+                rect(3, 1, 10, 1, accent)
+                rect(2, 2, 1, 2, accent)
+                rect(13, 2, 1, 2, accent)
             }
         }
-
-        if shouldResetViewport {
-            context.coordinator.resetViewport(to: CompendiumComparisonView.initialZoomScale)
-        } else if !context.coordinator.isZooming,
-                  abs(scrollView.zoomScale - zoomScale) > 0.001 {
-            scrollView.setZoomScale(zoomScale, animated: false)
-        }
-        context.coordinator.canvasView?.applyZoom(scale: scrollView.zoomScale, mode: context.coordinator.isZooming ? .preview : .settled)
-        context.coordinator.canvasView?.updateSelection(nodeID: selectedNodeID, pairID: selectedPairID)
-    }
-
-    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
-        var zoomScale: Binding<CGFloat>
-        let onTapNode: (ComparisonDrinkNode) -> Void
-        weak var canvasView: ComparisonLadderCanvasUIView?
-        weak var scrollView: UIScrollView?
-        let viewport = ZoomCanvasViewportController()
-        var nodes: [ComparisonLadderNodeEntry] = []
-        var contentSize: CGSize = .zero
-        var contentSignature = ""
-        var centerResetToken = 0
-        var isZooming = false
-        private var lastReportedZoomScale: CGFloat = 0
-
-        init(zoomScale: Binding<CGFloat>, onTapNode: @escaping (ComparisonDrinkNode) -> Void) {
-            self.zoomScale = zoomScale
-            self.onTapNode = onTapNode
-        }
-
-        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
-            canvasView
-        }
-
-        func handleScrollViewLayout() {
-            viewport.handleLayout()
-        }
-
-        func resetViewport(to scale: CGFloat) {
-            isZooming = false
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                zoomScale.wrappedValue = scale
-            }
-            viewport.requestReset(zoomScale: scale)
-        }
-
-        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended,
-                  let scrollView,
-                  let entry = entry(at: recognizer.location(in: scrollView)) else { return }
-            onTapNode(entry.node)
-        }
-
-        func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
-            isZooming = true
-            viewport.cancelPendingReset()
-        }
-
-        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-            viewport.cancelPendingReset()
-        }
-
-        func scrollViewDidZoom(_ scrollView: UIScrollView) {
-            let scale = scrollView.zoomScale
-            if abs(scale - lastReportedZoomScale) > 0.015 {
-                lastReportedZoomScale = scale
-                zoomScale.wrappedValue = scale
-            }
-            viewport.updateContentInsets()
-            canvasView?.applyZoom(scale: scale, mode: .preview)
-        }
-
-        func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
-            isZooming = false
-            let settledScale = scrollView.zoomScale
-            zoomScale.wrappedValue = settledScale
-            viewport.updateContentInsets()
-            viewport.clampContentOffset()
-            canvasView?.applyZoom(scale: settledScale, mode: .settled, animatesLabel: true)
-        }
-
-        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-            if !decelerate {
-                viewport.clampContentOffset()
-            }
-        }
-
-        func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-            viewport.clampContentOffset()
-        }
-
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            guard gestureRecognizer is UITapGestureRecognizer, let scrollView else { return true }
-            return entry(at: touch.location(in: scrollView)) != nil
-        }
-
-        private func entry(at scrollViewPoint: CGPoint) -> ComparisonLadderNodeEntry? {
-            guard let scrollView, let canvasView else { return nil }
-            let contentPoint = canvasView.convert(scrollViewPoint, from: scrollView)
-            let counterScale = ComparisonLadderCanvasUIView.nodeCounterScale(for: scrollView.zoomScale)
-            let hitSize = CGSize(width: 58 * counterScale, height: 64 * counterScale)
-            return nodes.reversed().first { entry in
-                CGRect(
-                    x: entry.position.x - hitSize.width / 2,
-                    y: entry.position.y - hitSize.height / 2,
-                    width: hitSize.width,
-                    height: hitSize.height
-                ).insetBy(dx: -5, dy: -5).contains(contentPoint)
-            }
-        }
+        .drawingGroup(opaque: false, colorMode: .nonLinear)
     }
 }
 
-private final class ComparisonLadderCanvasUIView: UIView {
-    enum LabelMode {
-        case preview
-        case settled
-    }
-
-    private let axisLayer = CALayer()
-    private let connectionContainerLayer = CALayer()
-    private let nodeContainerLayer = CALayer()
-    private var nodeLayers: [String: ComparisonNodeLayer] = [:]
-    private var connectionLayers: [String: CAShapeLayer] = [:]
-    private var currentScale: CGFloat = 0.48
-    private var currentMode = LabelMode.settled
-    private var contentSignature = ""
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        isOpaque = false
-        layer.addSublayer(axisLayer)
-        layer.addSublayer(connectionContainerLayer)
-        layer.addSublayer(nodeContainerLayer)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func configure(
-        metrics: ComparisonLadderMetrics,
-        nodes: [ComparisonLadderNodeEntry],
-        connections: [ComparisonLadderConnectionEntry],
-        contentSize: CGSize,
-        contentSignature: String,
-        displayScale: CGFloat
-    ) {
-        let shouldAnimate = self.contentSignature != contentSignature
-        self.contentSignature = contentSignature
-        currentScale = displayScale
-        comparisonWithoutLayerActions {
-            bounds = CGRect(origin: .zero, size: contentSize)
-            axisLayer.frame = bounds
-            connectionContainerLayer.frame = bounds
-            nodeContainerLayer.frame = bounds
-            rebuildAxis(metrics: metrics)
-            rebuildConnections(metrics: metrics, connections: connections)
-            rebuildNodes(nodes: nodes)
-            applyZoom(scale: currentScale, mode: currentMode)
-        }
-        if shouldAnimate {
-            runEntranceAnimation(connectionCount: connections.count)
-        }
-    }
-
-    func applyZoom(scale: CGFloat, mode: LabelMode, animatesLabel: Bool = false) {
-        currentScale = scale
-        currentMode = mode
-        let counterScale = Self.nodeCounterScale(for: scale)
-        let labelOpacity: CGFloat = switch mode {
-        case .preview:
-            Self.labelRevealProgress(for: scale)
-        case .settled:
-            Self.labelRevealProgress(for: scale) > 0 ? 1 : 0
-        }
-        comparisonWithoutLayerActions {
-            nodeLayers.values.forEach { $0.apply(counterScale: counterScale, labelOpacity: labelOpacity, animatesLabel: animatesLabel) }
-        }
-    }
-
-    func updateSelection(nodeID: String?, pairID: String?) {
-        comparisonWithoutLayerActions {
-            nodeLayers.values.forEach { layer in
-                let isSelected = nodeID == layer.entry.id || pairID == layer.entry.node.matchedPairID
-                let shouldDim = nodeID != nil && !isSelected
-                layer.updateSelection(isSelected: isSelected, isDimmed: shouldDim)
-            }
-            connectionLayers.forEach { id, layer in
-                let isSelected = pairID == id
-                let shouldDim = pairID != nil && !isSelected
-                layer.opacity = shouldDim ? 0.12 : (isSelected ? 0.95 : 0.46)
-                layer.lineWidth = isSelected ? 5.1 : (layer.value(forKey: "baseLineWidth") as? CGFloat ?? 2.7)
-                layer.zPosition = isSelected ? 100 : 0
-            }
-        }
-    }
-
-    static func nodeCounterScale(for scale: CGFloat) -> CGFloat {
-        1 / pow(max(min(2.35, max(CompendiumComparisonView.minimumZoomScale, scale)), 0.01), 0.46)
-    }
-
-    private static func labelRevealProgress(for scale: CGFloat) -> CGFloat {
-        let raw = (min(2.35, max(CompendiumComparisonView.minimumZoomScale, scale)) - 0.82) / (1.06 - 0.82)
-        let clamped = min(1, max(0, raw))
-        return clamped * clamped * (3 - 2 * clamped)
-    }
-
-    private func rebuildAxis(metrics: ComparisonLadderMetrics) {
-        axisLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-
-        let verticalPath = UIBezierPath()
-        verticalPath.move(to: CGPoint(x: metrics.centerX, y: metrics.plotTop))
-        verticalPath.addLine(to: CGPoint(x: metrics.centerX, y: metrics.plotBottom))
-        axisLayer.addSublayer(shapeLayer(path: verticalPath.cgPath, color: UIColor.black.withAlphaComponent(0.24), lineWidth: 1.2, dashPattern: [5, 10]))
-
-        let horizontalPath = UIBezierPath()
-        let scoreTextLayer = CALayer()
-        scoreTextLayer.frame = axisLayer.bounds
-        for score in 0...5 {
-            let y = metrics.plotTop + CGFloat(5 - score) / 5 * metrics.plotHeight
-            horizontalPath.move(to: CGPoint(x: 22, y: y))
-            horizontalPath.addLine(to: CGPoint(x: metrics.centerX - metrics.axisLineGap, y: y))
-            horizontalPath.move(to: CGPoint(x: metrics.centerX + metrics.axisLineGap, y: y))
-            horizontalPath.addLine(to: CGPoint(x: metrics.size.width - 22, y: y))
-
-            let text = CATextLayer()
-            text.string = "\(score)"
-            text.font = UIFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
-            text.fontSize = 12
-            text.foregroundColor = UIColor.secondaryLabel.cgColor
-            text.alignmentMode = .center
-            text.contentsScale = UIScreen.main.scale
-            text.frame = CGRect(x: metrics.centerX - 18, y: y - 9, width: 36, height: 18)
-            scoreTextLayer.addSublayer(text)
-        }
-        axisLayer.addSublayer(shapeLayer(path: horizontalPath.cgPath, color: UIColor.black.withAlphaComponent(0.16), lineWidth: 0.85, dashPattern: [8, 12]))
-        axisLayer.addSublayer(scoreTextLayer)
-    }
-
-    private func rebuildConnections(metrics: ComparisonLadderMetrics, connections: [ComparisonLadderConnectionEntry]) {
-        connectionContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        connectionLayers = [:]
-        for connection in connections {
-            let path = UIBezierPath()
-            path.move(to: connection.start)
-            path.addCurve(
-                to: connection.end,
-                controlPoint1: CGPoint(x: metrics.centerX - 78, y: connection.start.y),
-                controlPoint2: CGPoint(x: metrics.centerX + 78, y: connection.end.y)
-            )
-            let layer = shapeLayer(
-                path: path.cgPath,
-                color: connection.color.withAlphaComponent(connection.pair.ratingDelta > 1.5 ? 0.62 : 0.52),
-                lineWidth: connection.lineWidth,
-                dashPattern: connection.pair.ratingDelta > 1.5 ? [8, 7] : nil
-            )
-            layer.opacity = 0.46
-            layer.setValue(connection.lineWidth, forKey: "baseLineWidth")
-            connectionContainerLayer.addSublayer(layer)
-            connectionLayers[connection.id] = layer
-        }
-    }
-
-    private func rebuildNodes(nodes: [ComparisonLadderNodeEntry]) {
-        nodeContainerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
-        nodeLayers = Dictionary(nodes.map { entry in
-            let layer = ComparisonNodeLayer(entry: entry)
-            nodeContainerLayer.addSublayer(layer)
-            return (entry.id, layer)
-        }, uniquingKeysWith: { _, latest in latest })
-    }
-
-    private func shapeLayer(path: CGPath, color: UIColor, lineWidth: CGFloat, dashPattern: [NSNumber]?) -> CAShapeLayer {
-        let layer = CAShapeLayer()
-        layer.path = path
-        layer.fillColor = UIColor.clear.cgColor
-        layer.strokeColor = color.cgColor
-        layer.lineWidth = lineWidth
-        layer.lineCap = .round
-        layer.lineJoin = .round
-        layer.lineDashPattern = dashPattern
-        layer.contentsScale = UIScreen.main.scale
-        return layer
-    }
-
-    private func runEntranceAnimation(connectionCount: Int) {
-        guard !UIAccessibility.isReduceMotionEnabled else {
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 0
-            fade.toValue = 1
-            fade.duration = 0.18
-            layer.add(fade, forKey: "reducedEntranceFade")
-            return
-        }
-
-        let entranceBeginTime = CACurrentMediaTime() + 0.35
-        let nodeRevealScale = Self.nodeCounterScale(for: currentScale)
-
-        for (index, connectionLayer) in connectionLayers.values.enumerated() {
-            let draw = CABasicAnimation(keyPath: "strokeEnd")
-            draw.fromValue = 0
-            draw.toValue = 1
-            draw.duration = connectionCount > 80 ? 0.51 : 0.93
-            draw.beginTime = entranceBeginTime + (connectionCount > 80 ? 0 : min(0.22, Double(index) * 0.012))
-            draw.fillMode = .backwards
-            draw.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            connectionLayer.add(draw, forKey: "strokeReveal")
-        }
-
-        for (index, nodeLayer) in nodeLayers.values.enumerated() {
-            let group = CAAnimationGroup()
-            let fade = CABasicAnimation(keyPath: "opacity")
-            fade.fromValue = 0
-            fade.toValue = nodeLayer.opacity
-            let scale = CABasicAnimation(keyPath: "transform.scale")
-            scale.fromValue = nodeRevealScale * 0.9
-            scale.toValue = nodeRevealScale
-            group.animations = [fade, scale]
-            group.duration = 0.26
-            group.beginTime = entranceBeginTime + min(0.18, Double(index) * 0.006)
-            group.fillMode = .backwards
-            group.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            nodeLayer.add(group, forKey: "nodeReveal")
-        }
-    }
-}
-
-private final class ComparisonNodeLayer: CALayer {
-    let entry: ComparisonLadderNodeEntry
-    private let badgeLayer = CALayer()
-    private let badgeCircleLayer = CAShapeLayer()
-    private let stickerLayer = CALayer()
-    private let ratingBadgeLayer = CALayer()
-    private let ratingTextLayer = CATextLayer()
-    private let labelContainerLayer = CALayer()
-    private let nameTextLayer = CATextLayer()
-    private let brandTextLayer = CATextLayer()
-    private let sideTextLayer = CATextLayer()
-    private let nodeHeight: CGFloat = 58
-    private let badgeSize: CGFloat = 34
-    private let labelWidth: CGFloat = 86
-
-    init(entry: ComparisonLadderNodeEntry) {
-        self.entry = entry
-        super.init()
-        contentsScale = UIScreen.main.scale
-        bounds = CGRect(x: 0, y: 0, width: labelWidth, height: nodeHeight)
-        position = entry.position
-        setupBadge()
-        setupLabel()
-        addSublayer(badgeLayer)
-        addSublayer(labelContainerLayer)
-        accessibilityLabel = entry.accessibilityLabel
-    }
-
-    override init(layer: Any) {
-        guard let layer = layer as? ComparisonNodeLayer else {
-            fatalError("Unsupported layer copy")
-        }
-        entry = layer.entry
-        super.init(layer: layer)
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    func apply(counterScale: CGFloat, labelOpacity: CGFloat, animatesLabel: Bool) {
-        position = entry.position
-        transform = CATransform3DMakeScale(counterScale, counterScale, 1)
-        zPosition = 10_000 - entry.position.y
-        let renderedOpacity = Float(labelOpacity > 0 ? max(0.003, labelOpacity) : 0)
-        if animatesLabel, labelContainerLayer.opacity != renderedOpacity {
-            let animation = CABasicAnimation(keyPath: "opacity")
-            animation.fromValue = labelContainerLayer.presentation()?.opacity ?? labelContainerLayer.opacity
-            animation.toValue = renderedOpacity
-            animation.duration = 0.18
-            animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            labelContainerLayer.opacity = renderedOpacity
-            labelContainerLayer.add(animation, forKey: "labelOpacity")
-        } else {
-            labelContainerLayer.opacity = renderedOpacity
-        }
-    }
-
-    func updateSelection(isSelected: Bool, isDimmed: Bool) {
-        opacity = isDimmed ? 0.38 : 1
-        badgeCircleLayer.lineWidth = isSelected ? 2.4 : 1
-        badgeCircleLayer.strokeColor = UIColor.black.withAlphaComponent(isSelected ? 0.72 : 0.12).cgColor
-        zPosition = isSelected ? 20_000 : 10_000 - entry.position.y
-        shadowColor = UIColor.black.cgColor
-        shadowOpacity = isSelected ? 0.2 : 0
-        shadowRadius = isSelected ? 15 : 0
-        shadowOffset = CGSize(width: 0, height: isSelected ? 8 : 0)
-    }
-
-    private func setupBadge() {
-        badgeLayer.frame = CGRect(x: (bounds.width - badgeSize) / 2, y: 0, width: badgeSize, height: badgeSize)
-        badgeCircleLayer.frame = badgeLayer.bounds
-        badgeCircleLayer.path = UIBezierPath(ovalIn: badgeLayer.bounds).cgPath
-        badgeCircleLayer.fillColor = UIColor.white.withAlphaComponent(0.96).cgColor
-        badgeCircleLayer.strokeColor = UIColor.black.withAlphaComponent(0.12).cgColor
-        badgeCircleLayer.lineWidth = 1
-        badgeCircleLayer.shadowColor = UIColor.black.cgColor
-        badgeCircleLayer.shadowOpacity = 0.13
-        badgeCircleLayer.shadowRadius = 8
-        badgeCircleLayer.shadowOffset = CGSize(width: 0, height: 4)
-        badgeLayer.addSublayer(badgeCircleLayer)
-
-        stickerLayer.frame = badgeLayer.bounds.insetBy(dx: 5, dy: 5)
-        stickerLayer.contentsGravity = .resizeAspect
-        stickerLayer.contentsScale = UIScreen.main.scale
-        stickerLayer.minificationFilter = .trilinear
-        stickerLayer.magnificationFilter = .linear
-        stickerLayer.contents = stickerContents()
-        badgeLayer.addSublayer(stickerLayer)
-
-        let rating = String(format: "%.2f", entry.node.aggregateRating)
-        let ratingFont = UIFont.monospacedDigitSystemFont(ofSize: 6.8, weight: .bold)
-        let ratingWidth = max(23, rating.size(withAttributes: [.font: ratingFont]).width + 6)
-        ratingBadgeLayer.frame = CGRect(x: badgeLayer.bounds.maxX - ratingWidth + 5, y: badgeLayer.bounds.maxY - 9, width: ratingWidth, height: 12)
-        ratingBadgeLayer.backgroundColor = UIColor.black.withAlphaComponent(0.78).cgColor
-        ratingBadgeLayer.cornerRadius = 6
-        ratingBadgeLayer.masksToBounds = true
-        badgeLayer.addSublayer(ratingBadgeLayer)
-
-        ratingTextLayer.frame = CGRect(x: 3, y: 1.5, width: ratingWidth - 6, height: 9)
-        configureTextLayer(ratingTextLayer, text: rating, font: ratingFont, color: .white, alignment: .center)
-        ratingBadgeLayer.addSublayer(ratingTextLayer)
-    }
-
-    private func setupLabel() {
-        labelContainerLayer.frame = CGRect(x: 0, y: 37, width: labelWidth, height: 28)
-        labelContainerLayer.backgroundColor = UIColor.white.withAlphaComponent(0.92).cgColor
-        labelContainerLayer.cornerRadius = 9
-        labelContainerLayer.shadowColor = UIColor.black.cgColor
-        labelContainerLayer.shadowOpacity = 0.06
-        labelContainerLayer.shadowRadius = 4
-        labelContainerLayer.shadowOffset = CGSize(width: 0, height: 2)
-
-        sideTextLayer.frame = CGRect(x: 6, y: 2, width: labelWidth - 12, height: 8)
-        configureTextLayer(sideTextLayer, text: entry.ownerName, font: .systemFont(ofSize: 7, weight: .bold), color: .secondaryLabel, alignment: .center)
-        labelContainerLayer.addSublayer(sideTextLayer)
-
-        nameTextLayer.frame = CGRect(x: 6, y: 9, width: labelWidth - 12, height: 10)
-        configureTextLayer(nameTextLayer, text: entry.node.displayName, font: .systemFont(ofSize: 8.5, weight: .semibold), color: .label, alignment: .center)
-        labelContainerLayer.addSublayer(nameTextLayer)
-
-        brandTextLayer.frame = CGRect(x: 6, y: 18, width: labelWidth - 12, height: 9)
-        configureTextLayer(brandTextLayer, text: entry.node.displayBrand, font: .systemFont(ofSize: 7.5), color: .secondaryLabel, alignment: .center)
-        labelContainerLayer.addSublayer(brandTextLayer)
-    }
-
-    private func configureTextLayer(_ layer: CATextLayer, text: String, font: UIFont, color: UIColor, alignment: CATextLayerAlignmentMode) {
-        layer.string = text
-        layer.font = font
-        layer.fontSize = font.pointSize
-        layer.foregroundColor = color.cgColor
-        layer.alignmentMode = alignment
-        layer.contentsScale = UIScreen.main.scale
-        layer.truncationMode = .end
-        layer.isWrapped = false
-    }
-
-    private func stickerContents() -> CGImage? {
-        if let cgImage = entry.node.representative.stickerRenderImage?.cgImage {
-            return cgImage
-        }
-        guard let image = UIImage(systemName: "cup.and.saucer.fill")?.withTintColor(UIColor.brown.withAlphaComponent(0.62), renderingMode: .alwaysOriginal) else {
-            return nil
-        }
-        return UIGraphicsImageRenderer(size: stickerLayer.bounds.size).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: stickerLayer.bounds.size))
-        }.cgImage
+private extension Color {
+    init(pixelHex hex: String) {
+        let cleaned = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#").union(.whitespacesAndNewlines))
+        var value: UInt64 = 0
+        Scanner(string: cleaned).scanHexInt64(&value)
+        let red = Double((value >> 16) & 0xFF) / 255
+        let green = Double((value >> 8) & 0xFF) / 255
+        let blue = Double(value & 0xFF) / 255
+        self.init(red: red, green: green, blue: blue)
     }
 }
 
 private struct ComparisonDrinkCardOverlay: View {
-    let node: ComparisonDrinkNode
-    let pair: ComparisonDrinkPair?
-    let localOwnerName: String
-    let peerOwnerName: String
+    let selectedEntry: ComparisonLadderNodeEntry
+    let rows: [ComparisonOverlayRow]
     let onClose: () -> Void
 
-    private var localNode: ComparisonDrinkNode? {
-        if let pair { return pair.local }
-        return node.side == .local ? node : nil
-    }
+    private static let cardPadding: CGFloat = 14
+    private static let headerHeight: CGFloat = 40
+    private static let scoreSummaryHeight: CGFloat = 24
+    private static let headerScoreSummarySpacing: CGFloat = 8
+    private static let headerListSpacing: CGFloat = 12
+    private static let listBottomPadding: CGFloat = 2
+    private static let rowSpacing: CGFloat = 8
+    private static let recordedRowHeight: CGFloat = 140
+    private static let missingRowHeight: CGFloat = 76
+    private static let topClearance: CGFloat = 118
+    private static let bottomClearance: CGFloat = 34
 
-    private var peerNode: ComparisonDrinkNode? {
-        if let pair { return pair.peer }
-        return node.side == .peer ? node : nil
+    private var selectedNode: ComparisonDrinkNode {
+        selectedEntry.node
     }
 
     var body: some View {
         GeometryReader { proxy in
             let width = min(proxy.size.width - 28, 430)
+            let maxCardHeight = max(280, proxy.size.height - Self.topClearance - Self.bottomClearance)
+            let cardHeight = cardHeight(maxCardHeight: maxCardHeight)
+            let listHeight = max(
+                1,
+                cardHeight
+                    - Self.cardPadding * 2
+                    - Self.headerHeight
+                    - Self.headerScoreSummarySpacing
+                    - Self.scoreSummaryHeight
+                    - Self.headerListSpacing
+            )
             ZStack {
                 Color.black.opacity(0.1)
                     .ignoresSafeArea()
                     .contentShape(Rectangle())
                     .onTapGesture(perform: onClose)
 
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .top, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(pair?.local.displayName ?? node.displayName)
-                                .font(.title3.weight(.black))
-                                .lineLimit(1)
-                            Text(summaryText)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button(action: onClose) {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.primary)
-                                .frame(width: 30, height: 30)
-                                .background(Color.black.opacity(0.06))
-                                .clipShape(Circle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-
-                    ComparisonStackCard(ownerName: localOwnerName, node: localNode, accent: .black)
-                    ComparisonStackCard(ownerName: peerOwnerName, node: peerNode, accent: .blue)
-                }
-                .padding(16)
+                cardContent(listHeight: listHeight)
+                .padding(Self.cardPadding)
                 .frame(width: width)
+                .frame(height: cardHeight, alignment: .top)
                 .background(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .stroke(.black.opacity(0.08), lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.18), radius: 28, y: 16)
-                .position(x: proxy.size.width / 2, y: proxy.size.height * 0.48)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, Self.topClearance)
                 .onTapGesture {}
             }
         }
     }
 
-    private var summaryText: String {
-        if let pair {
-            return "共同喝过 · 评分差 \(String(format: "%.2f", pair.ratingDelta))"
-        }
-        return node.side == .local ? "只在我的图鉴里记录" : "只在 \(peerOwnerName) 的图鉴里记录"
+    private func cardHeight(maxCardHeight: CGFloat) -> CGFloat {
+        min(maxCardHeight, naturalCardHeight)
     }
+
+    private var naturalCardHeight: CGFloat {
+        let listRowsHeight = rows.reduce(CGFloat.zero) { partial, row in
+            partial + (row.node == nil ? Self.missingRowHeight : Self.recordedRowHeight)
+        }
+        let listSpacing = CGFloat(max(0, rows.count - 1)) * Self.rowSpacing
+        return Self.cardPadding * 2
+            + Self.headerHeight
+            + Self.headerScoreSummarySpacing
+            + Self.scoreSummaryHeight
+            + Self.headerListSpacing
+            + listRowsHeight
+            + listSpacing
+            + Self.listBottomPadding
+    }
+
+    private func cardContent(listHeight: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            cardHeader
+
+            ComparisonOverlayScoreSummary(rows: rows)
+                .frame(height: Self.scoreSummaryHeight)
+                .padding(.top, Self.headerScoreSummarySpacing)
+
+            ScrollView {
+                LazyVStack(spacing: Self.rowSpacing) {
+                    ForEach(rows) { row in
+                        ComparisonStackCard(
+                            ownerName: row.ownerName,
+                            node: row.node,
+                            accent: row.accent,
+                            isFocused: row.isFocused
+                        )
+                    }
+                }
+                .padding(.bottom, Self.listBottomPadding)
+            }
+            .frame(height: listHeight, alignment: .top)
+            .scrollIndicators(.hidden)
+            .padding(.top, Self.headerListSpacing)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var cardHeader: some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(selectedNode.displayName)
+                    .font(.headline.weight(.black))
+                    .lineLimit(1)
+                Text(summaryText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 30, height: 30)
+                    .background(Color.black.opacity(0.06))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(height: Self.headerHeight, alignment: .top)
+    }
+
+    private var summaryText: String {
+        let recordedNodes = rows.compactMap(\.node)
+        guard recordedNodes.count >= 2 else { return "\(selectedEntry.ownerName) 记录过" }
+        return "\(recordedNodes.count) 人记录"
+    }
+}
+
+private struct ComparisonOverlayScoreSummary: View {
+    let rows: [ComparisonOverlayRow]
+
+    private let pointSize: CGFloat = 9
+
+    private var scorePoints: [OverlayScorePoint] {
+        rows.compactMap { row in
+            guard let node = row.node else { return nil }
+            return OverlayScorePoint(
+                id: row.id,
+                rating: node.aggregateRating,
+                color: row.accent,
+                isFocused: row.isFocused
+            )
+        }
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = max(1, proxy.size.width)
+            let trackStart = pointSize / 2
+            let trackWidth = max(1, width - pointSize)
+            let centerY = proxy.size.height * 0.50
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.black.opacity(0.055))
+                    .frame(width: trackWidth, height: 1.2)
+                    .position(x: trackStart + trackWidth / 2, y: centerY)
+
+                ForEach([0, 5], id: \.self) { score in
+                    Circle()
+                        .fill(Color.black.opacity(0.14))
+                        .frame(width: 2.2, height: 2.2)
+                        .position(x: trackStart + CGFloat(score) / 5 * trackWidth, y: centerY)
+                }
+
+                ForEach(scorePoints) { point in
+                    let x = trackStart + CGFloat(clampedRating(point.rating)) / 5 * trackWidth
+
+                    ZStack {
+                        Circle()
+                            .stroke(point.color.opacity(point.isFocused ? 0.24 : 0.16), lineWidth: point.isFocused ? 3.2 : 2.4)
+                            .frame(width: pointSize + 4, height: pointSize + 4)
+
+                        Circle()
+                            .fill(point.color.opacity(point.isFocused ? 0.96 : 0.86))
+                            .frame(width: pointSize, height: pointSize)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color(.systemBackground).opacity(0.96), lineWidth: 1)
+                        )
+                    }
+                    .position(x: x, y: centerY)
+                }
+            }
+            .frame(width: width, height: proxy.size.height)
+        }
+        .accessibilityLabel("当前饮品各图鉴评分位置")
+    }
+
+    private func clampedRating(_ rating: Double) -> Double {
+        min(5, max(0, rating))
+    }
+}
+
+private struct OverlayScorePoint: Identifiable {
+    let id: String
+    let rating: Double
+    let color: Color
+    let isFocused: Bool
 }
 
 private struct ComparisonStackCard: View {
     let ownerName: String
     let node: ComparisonDrinkNode?
     let accent: Color
+    let isFocused: Bool
 
     var body: some View {
-        HStack(spacing: 12) {
-            sticker
-                .frame(width: 72, height: 86)
+        Group {
+            if let node {
+                recordedCard(for: node)
+            } else {
+                missingCard
+            }
+        }
+        .padding(9)
+        .background(Color(.secondarySystemGroupedBackground).opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(isFocused ? accent.opacity(0.76) : .black.opacity(0.06), lineWidth: isFocused ? 1.6 : 1)
+        )
+    }
 
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 7) {
-                    Text(ownerName)
-                        .font(.caption.weight(.black))
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .foregroundStyle(node == nil ? Color.secondary : Color.white)
-                        .background(node == nil ? Color(.secondarySystemGroupedBackground) : accent)
-                        .clipShape(Capsule())
-                    Spacer()
-                    if let node {
+    private func recordedCard(for node: ComparisonDrinkNode) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                sticker
+                    .frame(width: 58, height: 64)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 7) {
+                        Text(ownerName)
+                            .font(.caption.weight(.black))
+                            .lineLimit(1)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .foregroundStyle(Color.white)
+                            .background(accent)
+                            .clipShape(Capsule())
+                        Spacer()
                         Text(String(format: "%.2f", node.aggregateRating))
-                            .font(.headline.weight(.black).monospacedDigit())
+                            .font(.subheadline.weight(.black).monospacedDigit())
+                            .lineLimit(1)
                     }
-                }
 
-                if let node {
                     Text(node.displayBrand)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
@@ -1120,32 +1805,36 @@ private struct ComparisonStackCard: View {
                     Text(node.displayName)
                         .font(.subheadline.weight(.bold))
                         .lineLimit(2)
-                    HStack(spacing: 7) {
-                        infoPill("甜度", node.representative.sweetness)
-                        infoPill("冰度", node.representative.iceLevel)
-                        infoPill("杯数", "\(node.totalCupCount)")
-                    }
-                    Text(displayNote(for: node))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                } else {
-                    Text("未记录这杯")
-                        .font(.subheadline.weight(.bold))
-                    Text("这本图鉴里暂时没有对应饮品。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
+                .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
+            }
+
+            bottomInfo(for: node)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var missingCard: some View {
+        HStack(alignment: .center, spacing: 10) {
+            sticker
+                .frame(width: 58, height: 58)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(ownerName)
+                    .font(.caption.weight(.black))
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
+                Text("未记录这杯")
+                    .font(.subheadline.weight(.bold))
+                    .lineLimit(1)
+                Text("这本图鉴里暂时没有对应饮品。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(12)
-        .background(Color(.secondarySystemGroupedBackground).opacity(0.72))
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(.black.opacity(0.06), lineWidth: 1)
-        )
+        .frame(minHeight: 58, alignment: .center)
     }
 
     @ViewBuilder
@@ -1166,8 +1855,35 @@ private struct ComparisonStackCard: View {
         }
     }
 
-    private func infoPill(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
+    private func bottomInfo(for node: ComparisonDrinkNode) -> some View {
+        let edgeInset: CGFloat = 13
+        let textInset: CGFloat = 7
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 7) {
+                infoPill("甜度", node.representative.sweetness, textAlignment: .leading, frameAlignment: .leading)
+                infoPill("冰度", node.representative.iceLevel, textAlignment: .leading, frameAlignment: .center)
+                infoPill("杯数", "\(node.totalCupCount)", textAlignment: .leading, frameAlignment: .trailing)
+            }
+            .padding(.horizontal, edgeInset)
+
+            Text(displayNote(for: node))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.leading, edgeInset + textInset)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 50, alignment: .top)
+    }
+
+    private func infoPill(
+        _ title: String,
+        _ value: String,
+        textAlignment: HorizontalAlignment = .leading,
+        frameAlignment: Alignment = .leading
+    ) -> some View {
+        VStack(alignment: textAlignment, spacing: 1) {
             Text(title)
                 .font(.system(size: 8, weight: .medium))
                 .foregroundStyle(.secondary)
@@ -1175,11 +1891,11 @@ private struct ComparisonStackCard: View {
                 .font(.caption2.weight(.bold))
                 .lineLimit(1)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 7)
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
         .background(.white.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: frameAlignment)
     }
 
     private func displayNote(for node: ComparisonDrinkNode) -> String {
@@ -1188,34 +1904,5 @@ private struct ComparisonStackCard: View {
         let location = node.representative.location.trimmingCharacters(in: .whitespacesAndNewlines)
         if !location.isEmpty { return location }
         return node.consumedCount > 1 ? "共 \(node.consumedCount) 条记录" : "无备注"
-    }
-}
-
-private func comparisonWithoutLayerActions(_ changes: () -> Void) {
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    changes()
-    CATransaction.commit()
-}
-
-private extension UIColor {
-    func blended(with color: UIColor, amount: CGFloat) -> UIColor {
-        let clamped = min(1, max(0, amount))
-        var r1: CGFloat = 0
-        var g1: CGFloat = 0
-        var b1: CGFloat = 0
-        var a1: CGFloat = 0
-        var r2: CGFloat = 0
-        var g2: CGFloat = 0
-        var b2: CGFloat = 0
-        var a2: CGFloat = 0
-        getRed(&r1, green: &g1, blue: &b1, alpha: &a1)
-        color.getRed(&r2, green: &g2, blue: &b2, alpha: &a2)
-        return UIColor(
-            red: r1 * (1 - clamped) + r2 * clamped,
-            green: g1 * (1 - clamped) + g2 * clamped,
-            blue: b1 * (1 - clamped) + b2 * clamped,
-            alpha: a1 * (1 - clamped) + a2 * clamped
-        )
     }
 }

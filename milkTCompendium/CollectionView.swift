@@ -70,6 +70,9 @@ struct CollectionView: View {
     @StateObject private var ladderLayoutCache = LadderLayoutCache()
     let onStartCapture: () -> Void
     let onStartPhotoImport: () -> Void
+    let pendingDrafts: [PendingDrinkDraft]
+    let pendingDraftThumbnail: (PendingDrinkDraft) -> UIImage?
+    let onOpenPendingDrafts: () -> Void
 
     fileprivate static let defaultLadderScale: CGFloat = 0.40
     fileprivate static let initialLadderScale: CGFloat = defaultLadderScale
@@ -293,11 +296,22 @@ struct CollectionView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            CaptureBookmark(onCapture: {
-                onStartCapture()
-            }, onPhotoImport: {
-                onStartPhotoImport()
-            })
+            VStack(alignment: .trailing, spacing: 10) {
+                if isShowingMine, let recentPendingDraft {
+                    PendingDraftEntryButton(
+                        count: pendingDrafts.count,
+                        image: pendingDraftThumbnail(recentPendingDraft),
+                        action: onOpenPendingDrafts
+                    )
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+
+                CaptureBookmark(onCapture: {
+                    onStartCapture()
+                }, onPhotoImport: {
+                    onStartPhotoImport()
+                })
+            }
             .padding(.bottom, 48)
         }
         .overlay(alignment: .bottom) {
@@ -332,11 +346,10 @@ struct CollectionView: View {
             }
         }
         .navigationDestination(isPresented: comparisonBinding) {
-            if let comparisonCompendium {
+            if comparisonCompendium != nil {
                 CompendiumComparisonView(
                     localDrinks: drinks,
                     sharedCompendiums: sharedStore.compendiums,
-                    initialOwnerID: comparisonCompendium.ownerID,
                     localOwnerName: localProfileName
                 )
             }
@@ -647,6 +660,10 @@ struct CollectionView: View {
         TasteScoreCalculator.calculate(localDrinks: drinks, stats: tasteStatsStore.stats)
     }
 
+    private var recentPendingDraft: PendingDrinkDraft? {
+        pendingDrafts.sorted { $0.createdAt > $1.createdAt }.first
+    }
+
     private var normalizedSearchText: String {
         Self.normalizedSearch(searchText)
     }
@@ -758,6 +775,11 @@ struct CollectionView: View {
         isOverDeleteTarget = false
         ladderScale = Self.initialLadderScale
         ladderCenterResetToken += 1
+    }
+
+    private func openComparison() {
+        guard let compendium = sharedStore.compendiums.randomElement() else { return }
+        openComparison(compendium)
     }
 
     private func openComparison(_ compendium: SharedCompendium) {
@@ -905,6 +927,16 @@ struct CollectionView: View {
 
         do {
             let compendium = try await sharedStore.importArchive(at: url)
+            let profile = TasteScoreCalculator.profile(from: compendium)
+            tasteStatsStore.recordSuccessfulExchange(
+                ownerID: compendium.ownerID,
+                ownerName: compendium.ownerName,
+                drinkCount: TasteScoreCalculator.totalActualCupCount(profile: profile),
+                effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
+                averageRating: TasteScoreCalculator.averageRating(profile: profile),
+                profile: profile,
+                pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium)
+            )
             await MainActor.run {
                 temporaryCrossOwnerImportMessage = "已导入为共享图鉴：\(compendium.ownerName)。"
             }
@@ -1378,7 +1410,7 @@ private struct LadderTopDock: View {
     let isExporting: Bool
     let isImporting: Bool
     let onSwitchCompendium: (String) -> Void
-    let onCompareCompendium: (SharedCompendium) -> Void
+    let onCompareCompendium: () -> Void
     let onOpenProfile: () -> Void
     let onExport: () -> Void
     let onImport: () -> Void
@@ -1518,27 +1550,12 @@ private struct LadderTopDock: View {
 
     @ViewBuilder
     private var compareMenu: some View {
-        if sharedCompendiums.count == 1, let compendium = sharedCompendiums.first {
-            Button {
-                onCompareCompendium(compendium)
-            } label: {
-                compareChip
-            }
-            .buttonStyle(LeverControlButtonStyle())
-        } else {
-            Menu {
-                ForEach(sharedCompendiums) { compendium in
-                    Button {
-                        onCompareCompendium(compendium)
-                    } label: {
-                        Label(compendium.ownerName, systemImage: "person.2")
-                    }
-                }
-            } label: {
-                compareChip
-            }
-            .buttonStyle(LeverControlButtonStyle())
+        Button {
+            onCompareCompendium()
+        } label: {
+            compareChip
         }
+        .buttonStyle(LeverControlButtonStyle())
     }
 
     private var compareChip: some View {
@@ -1706,7 +1723,15 @@ private struct ZoomableLadderView: UIViewRepresentable {
         tapGesture.numberOfTouchesRequired = 1
         tapGesture.delegate = context.coordinator
         tapGesture.cancelsTouchesInView = false
+
+        let doubleTapGesture = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTapGesture.numberOfTapsRequired = 2
+        doubleTapGesture.numberOfTouchesRequired = 1
+        doubleTapGesture.delegate = context.coordinator
+        doubleTapGesture.cancelsTouchesInView = false
+
         scrollView.addGestureRecognizer(tapGesture)
+        scrollView.addGestureRecognizer(doubleTapGesture)
 
         let longPressGesture = UILongPressGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleLongPress(_:)))
         longPressGesture.minimumPressDuration = 0.28
@@ -1758,6 +1783,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
         let centerResetDidChange = context.coordinator.centerResetToken != centerResetToken
         let shouldResetViewport = centerResetDidChange || contentDidChange || sizeDidChange
         if shouldResetViewport {
+            context.coordinator.cancelProgrammaticZoom()
             context.coordinator.cancelDrag()
         } else {
             context.coordinator.ensureScrollEnabledIfIdle()
@@ -1834,7 +1860,13 @@ private struct ZoomableLadderView: UIViewRepresentable {
         var longPressedItem: LadderDrinkDisplayItem?
         var longPressStartContentPoint: CGPoint = .zero
         var lastZoomInteractionAt: TimeInterval = 0
+        var lastDoubleTapAt: TimeInterval = 0
+        var pendingTapWorkItem: DispatchWorkItem?
+        var isProgrammaticZooming = false
+        var programmaticZoomDisplayLink: CADisplayLink?
         private let zoomGestureCooldown: TimeInterval = 0.3
+        private let singleTapOpenDelay: TimeInterval = 0.2
+        private let doubleTapSuppressionWindow: TimeInterval = 0.35
 
         init(
             zoomScale: Binding<CGFloat>,
@@ -1850,6 +1882,10 @@ private struct ZoomableLadderView: UIViewRepresentable {
             self.onDragEnded = onDragEnded
         }
 
+        deinit {
+            programmaticZoomDisplayLink?.invalidate()
+        }
+
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
             canvasView
         }
@@ -1859,8 +1895,8 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func resetViewport(to scale: CGFloat) {
+            cancelProgrammaticZoom()
             cancelDrag()
-            isZooming = false
             reportZoomScale(scale)
             viewport.requestReset(zoomScale: scale)
         }
@@ -1872,7 +1908,111 @@ private struct ZoomableLadderView: UIViewRepresentable {
                   let entry = entry(at: recognizer.location(in: scrollView)) else {
                 return
             }
-            onTapItem(entry.item)
+            guard CACurrentMediaTime() - lastDoubleTapAt > doubleTapSuppressionWindow else { return }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            scheduleTapItem(entry.item)
+        }
+
+        @objc func handleDoubleTap(_ recognizer: UITapGestureRecognizer) {
+            guard recognizer.state == .ended,
+                  canStartCanvasZoomGesture,
+                  let scrollView else {
+                return
+            }
+
+            let now = CACurrentMediaTime()
+            lastDoubleTapAt = now
+            cancelPendingTap()
+            cancelDrag()
+            viewport.cancelPendingReset()
+            isZooming = true
+            isProgrammaticZooming = true
+            lastZoomInteractionAt = now
+
+            let currentScale = scrollView.zoomScale
+            let targetScale: CGFloat
+            let focusPoint: CGPoint
+            if currentScale < CollectionView.labelRevealScale - 0.001 {
+                targetScale = CollectionView.labelRevealScale
+                guard let tappedContentPoint = contentPointIfInsideCanvas(for: recognizer.location(in: scrollView)) else {
+                    isZooming = false
+                    isProgrammaticZooming = false
+                    return
+                }
+                focusPoint = tappedContentPoint
+            } else {
+                targetScale = CollectionView.defaultLadderScale
+                focusPoint = contentPoint(
+                    for: CGPoint(x: scrollView.bounds.midX, y: scrollView.bounds.midY)
+                )
+            }
+
+            startProgrammaticZoomTracking()
+            viewport.zoom(to: targetScale, centeredAtContentPoint: focusPoint, animated: true) { [weak self, weak scrollView] in
+                guard let self, let scrollView else { return }
+                self.finishProgrammaticZoom(scrollView: scrollView)
+            }
+        }
+
+        private func startProgrammaticZoomTracking() {
+            programmaticZoomDisplayLink?.invalidate()
+            let displayLink = CADisplayLink(target: self, selector: #selector(syncProgrammaticZoomPresentation(_:)))
+            displayLink.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            displayLink.add(to: .main, forMode: .common)
+            programmaticZoomDisplayLink = displayLink
+        }
+
+        @objc private func syncProgrammaticZoomPresentation(_ displayLink: CADisplayLink) {
+            guard isProgrammaticZooming, let scrollView, let canvasView else {
+                displayLink.invalidate()
+                programmaticZoomDisplayLink = nil
+                return
+            }
+
+            canvasView.applyZoom(
+                scale: presentationZoomScale(in: scrollView, canvasView: canvasView),
+                mode: .preview
+            )
+        }
+
+        private func finishProgrammaticZoom(scrollView: UIScrollView) {
+            guard isProgrammaticZooming else { return }
+            stopProgrammaticZoomTracking()
+            isZooming = false
+            isProgrammaticZooming = false
+            viewport.updateContentInsets()
+            viewport.clampContentOffset()
+            canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .settled, animatesLabel: true)
+            reportZoomScale(scrollView.zoomScale)
+            lastReportedZoomScale = scrollView.zoomScale
+            lastZoomInteractionAt = CACurrentMediaTime()
+        }
+
+        private func stopProgrammaticZoomTracking() {
+            programmaticZoomDisplayLink?.invalidate()
+            programmaticZoomDisplayLink = nil
+        }
+
+        func cancelProgrammaticZoom() {
+            stopProgrammaticZoomTracking()
+            if isProgrammaticZooming {
+                isZooming = false
+                isProgrammaticZooming = false
+            }
+        }
+
+        private func presentationZoomScale(in scrollView: UIScrollView, canvasView: UIView) -> CGFloat {
+            guard let presentation = canvasView.layer.presentation() else {
+                return scrollView.zoomScale
+            }
+
+            let widthScale = presentation.frame.width / max(canvasView.bounds.width, 1)
+            let heightScale = presentation.frame.height / max(canvasView.bounds.height, 1)
+            let scale = max(widthScale, heightScale)
+            guard scale.isFinite, scale > 0 else {
+                return scrollView.zoomScale
+            }
+            return scale
         }
 
         @objc func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
@@ -1883,6 +2023,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
             case .began:
                 guard allowsDragging, canStartDrinkGesture else { return }
                 guard let entry = entry(at: point), entry.item.localDrink != nil else { return }
+                cancelPendingTap()
                 longPressedItem = entry.item
                 longPressStartContentPoint = contentPoint(for: point)
                 scrollView.isScrollEnabled = false
@@ -1915,6 +2056,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
                 scrollView?.isScrollEnabled = true
                 return
             }
+            cancelPendingTap()
             finishDrag(shouldDelete: false)
         }
 
@@ -1935,6 +2077,28 @@ private struct ZoomableLadderView: UIViewRepresentable {
         private func contentPoint(for scrollViewPoint: CGPoint) -> CGPoint {
             guard let scrollView, let canvasView else { return scrollViewPoint }
             return canvasView.convert(scrollViewPoint, from: scrollView)
+        }
+
+        private func contentPointIfInsideCanvas(for scrollViewPoint: CGPoint) -> CGPoint? {
+            guard let scrollView, let canvasView else { return nil }
+            let contentPoint = canvasView.convert(scrollViewPoint, from: scrollView)
+            return canvasView.bounds.contains(contentPoint) ? contentPoint : nil
+        }
+
+        private func scheduleTapItem(_ item: LadderDrinkDisplayItem) {
+            cancelPendingTap()
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self, self.canStartDrinkGesture else { return }
+                self.onTapItem(item)
+                self.pendingTapWorkItem = nil
+            }
+            pendingTapWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + singleTapOpenDelay, execute: workItem)
+        }
+
+        private func cancelPendingTap() {
+            pendingTapWorkItem?.cancel()
+            pendingTapWorkItem = nil
         }
 
         private func isPointOverDeleteTarget(_ point: CGPoint, in scrollView: UIScrollView) -> Bool {
@@ -1982,14 +2146,24 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
-            if gestureRecognizer is UITapGestureRecognizer || gestureRecognizer is UILongPressGestureRecognizer {
+            if let tapGesture = gestureRecognizer as? UITapGestureRecognizer {
+                guard let scrollView else { return false }
+                let point = touch.location(in: scrollView)
+                if tapGesture.numberOfTapsRequired == 2 {
+                    return canStartCanvasZoomGesture
+                        && contentPointIfInsideCanvas(for: point) != nil
+                }
+                guard canStartDrinkGesture else { return false }
+                guard tapGesture.numberOfTapsRequired == 1 else { return true }
+                return entry(at: point) != nil
+            }
+
+            if gestureRecognizer is UILongPressGestureRecognizer {
                 guard canStartDrinkGesture, let scrollView else { return false }
                 guard let entry = entry(at: touch.location(in: scrollView)) else { return false }
-                if gestureRecognizer is UILongPressGestureRecognizer {
-                    return allowsDragging && entry.item.localDrink != nil
-                }
-                return true
+                return allowsDragging && entry.item.localDrink != nil
             }
+
             return true
         }
 
@@ -2018,6 +2192,12 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+            cancelPendingTap()
+            if isProgrammaticZooming {
+                cancelDrag()
+                viewport.cancelPendingReset()
+                return
+            }
             cancelDrag()
             isZooming = true
             viewport.cancelPendingReset()
@@ -2028,6 +2208,7 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+            cancelPendingTap()
             cancelDrag()
             viewport.cancelPendingReset()
         }
@@ -2035,10 +2216,15 @@ private struct ZoomableLadderView: UIViewRepresentable {
         func scrollViewDidZoom(_ scrollView: UIScrollView) {
             lastZoomInteractionAt = CACurrentMediaTime()
             viewport.updateContentInsets()
+            guard !isProgrammaticZooming else { return }
             canvasView?.applyZoom(scale: scrollView.zoomScale, mode: .preview)
         }
 
         func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+            if isProgrammaticZooming {
+                finishProgrammaticZoom(scrollView: scrollView)
+                return
+            }
             isZooming = false
             lastZoomInteractionAt = CACurrentMediaTime()
             viewport.updateContentInsets()
@@ -2067,10 +2253,15 @@ private struct ZoomableLadderView: UIViewRepresentable {
         }
 
         private var canStartDrinkGesture: Bool {
-            guard !isZooming else { return false }
-            guard CACurrentMediaTime() - lastZoomInteractionAt > zoomGestureCooldown else { return false }
+            guard !isZooming, longPressedItem == nil else { return false }
             guard let pinchState = scrollView?.pinchGestureRecognizer?.state else { return true }
             return pinchState == .possible || pinchState == .failed || pinchState == .cancelled
+        }
+
+        private var canStartCanvasZoomGesture: Bool {
+            guard canStartDrinkGesture else { return false }
+            guard CACurrentMediaTime() - lastZoomInteractionAt > zoomGestureCooldown else { return false }
+            return true
         }
 
         private func isDrinkGesture(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
@@ -2250,7 +2441,11 @@ private final class LadderCanvasUIView: UIView {
         applyZoom(scale: currentScale, mode: currentLabelMode)
     }
 
-    func applyZoom(scale: CGFloat, mode: LabelMode, animatesLabel: Bool = false) {
+    func applyZoom(
+        scale: CGFloat,
+        mode: LabelMode,
+        animatesLabel: Bool = false
+    ) {
         currentScale = scale
         currentLabelMode = mode
         let counterScale = CollectionView.nodeCounterScale(for: scale)
@@ -2606,6 +2801,118 @@ private struct DeleteDropZone: View {
         .offset(y: isActive ? -6 : 0)
         .shadow(color: isActive ? .red.opacity(0.28) : .black.opacity(0.14), radius: isActive ? 24 : 18, y: isActive ? 12 : 8)
         .animation(.spring(response: 0.2, dampingFraction: 0.68), value: isActive)
+    }
+}
+
+private struct PendingDraftEntryButton: View {
+    let count: Int
+    let image: UIImage?
+    let action: () -> Void
+    @State private var isExpanded = true
+
+    var body: some View {
+        Button(action: action) {
+            labelContent
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("待记录，\(count) 张")
+        .task(id: count) {
+            await showTemporarily()
+        }
+        .animation(.spring(response: 0.28, dampingFraction: 0.84), value: isExpanded)
+    }
+
+    @ViewBuilder
+    private var labelContent: some View {
+        if isExpanded {
+            HStack(spacing: 9) {
+                thumbnail
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("待记录")
+                        .font(.caption.weight(.bold))
+                    Text("\(count) 张")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .transition(.opacity)
+            }
+            .foregroundStyle(.primary)
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .frame(height: 52)
+            .frame(width: 142, alignment: .leading)
+            .background(.white.opacity(0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.black.opacity(0.1), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 14, y: 7)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        } else {
+            ZStack(alignment: .topTrailing) {
+                thumbnail
+
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .black).monospacedDigit())
+                    .foregroundStyle(.white)
+                    .frame(width: 18, height: 18)
+                    .background(Color.black.opacity(0.9))
+                    .clipShape(Circle())
+                    .offset(x: 5, y: -5)
+            }
+            .padding(8)
+            .frame(width: 56, height: 52)
+            .background(.white.opacity(0.96))
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(.black.opacity(0.1), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.12), radius: 14, y: 7)
+            .transition(.move(edge: .trailing).combined(with: .opacity))
+        }
+    }
+
+    private var thumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 38, height: 38)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            } else {
+                Image(systemName: "tray")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 38, height: 38)
+    }
+
+    private func showTemporarily() async {
+        await MainActor.run {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.84)) {
+                isExpanded = true
+            }
+        }
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        guard !Task.isCancelled else { return }
+        await MainActor.run {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                isExpanded = false
+            }
+        }
     }
 }
 

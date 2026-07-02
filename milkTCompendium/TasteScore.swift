@@ -1,4 +1,137 @@
 import Foundation
+import UIKit
+
+struct PixelPersonProfile: Codable, Hashable {
+    var skinHex: String
+    var hairHex: String
+    var topHex: String
+    var bottomHex: String
+    var accentHex: String
+    var hairStyle: Int
+    var faceStyle: Int
+    var accessoryStyle: Int
+    var cupStyle: Int
+
+    static func make(ownerID: String, ownerName: String, drinks: [Drink]) -> PixelPersonProfile {
+        make(
+            ownerID: ownerID,
+            ownerName: ownerName,
+            profile: TasteScoreCalculator.profile(from: drinks),
+            photoColorHexes: drinks.compactMap { photoColorHex(imageName: $0.stickerImageName) }
+        )
+    }
+
+    static func make(ownerID: String, ownerName: String, snapshots: [DrinkExportSnapshot]) -> PixelPersonProfile {
+        let profile = snapshots.map {
+            TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating, cupCount: max(1, $0.cupCount))
+        }
+        return make(
+            ownerID: ownerID,
+            ownerName: ownerName,
+            profile: profile,
+            photoColorHexes: snapshots.compactMap { photoColorHex(imageName: $0.stickerImageName) }
+        )
+    }
+
+    static func make(ownerID: String, ownerName: String, archivedDrinks: [SharedDrinkArchive]) -> PixelPersonProfile {
+        let profile = archivedDrinks.map {
+            TasteProfileDrink(brand: $0.brand, name: $0.name, rating: $0.rating, cupCount: max(1, $0.cupCount))
+        }
+        return make(
+            ownerID: ownerID,
+            ownerName: ownerName,
+            profile: profile,
+            photoColorHexes: archivedDrinks.compactMap { photoColorHex(data: $0.stickerData) }
+        )
+    }
+
+    static func make(compendium: SharedCompendium) -> PixelPersonProfile {
+        make(
+            ownerID: compendium.ownerID,
+            ownerName: compendium.ownerName,
+            profile: TasteScoreCalculator.profile(from: compendium),
+            photoColorHexes: compendium.drinks.compactMap {
+                photoColorHex(url: SharedCompendiumStore.stickerURL(ownerID: compendium.ownerID, fileName: $0.stickerFileName))
+            }
+        )
+    }
+
+    static func make(
+        ownerID: String,
+        ownerName: String,
+        profile: [TasteProfileDrink],
+        photoColorHexes: [String] = []
+    ) -> PixelPersonProfile {
+        let seedText = ([ownerID, ownerName] + profile.flatMap {
+            [$0.brand, $0.name, String(format: "%.2f", $0.rating), "\($0.cupCount)"]
+        } + photoColorHexes).joined(separator: "|")
+        let seed = stableHash(seedText)
+        let favoriteColor = photoColorHexes.first ?? paletteColor(seed: seed, offset: 8)
+        let accent = photoColorHexes.dropFirst().first ?? paletteColor(seed: seed, offset: 24)
+        return PixelPersonProfile(
+            skinHex: skinTones[Int(seed % UInt64(skinTones.count))],
+            hairHex: hairColors[Int((seed >> 5) % UInt64(hairColors.count))],
+            topHex: favoriteColor,
+            bottomHex: pantColors[Int((seed >> 13) % UInt64(pantColors.count))],
+            accentHex: accent,
+            hairStyle: Int((seed >> 21) % 4),
+            faceStyle: Int((seed >> 25) % 3),
+            accessoryStyle: Int((seed >> 29) % 4),
+            cupStyle: Int((seed >> 33) % 4)
+        )
+    }
+
+    private static let skinTones = ["#F5C7A9", "#DFA176", "#B8754C", "#F1D0B8", "#8F5E3F"]
+    private static let hairColors = ["#2C1F1A", "#5B3828", "#101820", "#7A4B2B", "#D8B36A", "#4B5563"]
+    private static let pantColors = ["#243B53", "#374151", "#31572C", "#6D597A", "#1F2937"]
+    private static let fallbackPalette = ["#E85D75", "#2A9D8F", "#F4A261", "#457B9D", "#7B2CBF", "#118AB2", "#06D6A0"]
+
+    private static func paletteColor(seed: UInt64, offset: UInt64) -> String {
+        fallbackPalette[Int(((seed >> offset) ^ seed) % UInt64(fallbackPalette.count))]
+    }
+
+    private static func stableHash(_ text: String) -> UInt64 {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return hash
+    }
+
+    private static func photoColorHex(imageName: String?) -> String? {
+        guard let image = ImageStore.thumbnail(imageName, maxPixel: 28) else { return nil }
+        return averageColorHex(from: image)
+    }
+
+    private static func photoColorHex(url: URL?) -> String? {
+        guard let image = ImageStore.thumbnail(at: url, maxPixel: 28) else { return nil }
+        return averageColorHex(from: image)
+    }
+
+    private static func photoColorHex(data: Data?) -> String? {
+        guard let data, let image = UIImage(data: data) else { return nil }
+        return averageColorHex(from: image)
+    }
+
+    private static func averageColorHex(from image: UIImage) -> String? {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let sample = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1), format: format).image { _ in
+            image.draw(in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+        guard let cgImage = sample.cgImage,
+              let providerData = cgImage.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(providerData) else {
+            return nil
+        }
+        let red = Int(bytes[0])
+        let green = Int(bytes[1])
+        let blue = Int(bytes[2])
+        return String(format: "#%02X%02X%02X", red, green, blue)
+    }
+}
 
 struct TasteProfileDrink: Codable, Hashable {
     var brand: String
@@ -37,6 +170,7 @@ struct TastePeerSnapshot: Codable, Identifiable {
     var averageRating: Double
     var lastExchangedAt: Date
     var profile: [TasteProfileDrink]
+    var pixelPerson: PixelPersonProfile?
 
     enum CodingKeys: String, CodingKey {
         case ownerID
@@ -46,6 +180,7 @@ struct TastePeerSnapshot: Codable, Identifiable {
         case averageRating
         case lastExchangedAt
         case profile
+        case pixelPerson
     }
 
     var id: String {
@@ -59,7 +194,8 @@ struct TastePeerSnapshot: Codable, Identifiable {
         effectiveDrinkCount: Int,
         averageRating: Double,
         lastExchangedAt: Date,
-        profile: [TasteProfileDrink]
+        profile: [TasteProfileDrink],
+        pixelPerson: PixelPersonProfile? = nil
     ) {
         self.ownerID = ownerID
         self.ownerName = ownerName
@@ -68,6 +204,7 @@ struct TastePeerSnapshot: Codable, Identifiable {
         self.averageRating = averageRating
         self.lastExchangedAt = lastExchangedAt
         self.profile = profile
+        self.pixelPerson = pixelPerson
     }
 
     init(from decoder: Decoder) throws {
@@ -89,6 +226,7 @@ struct TastePeerSnapshot: Codable, Identifiable {
         }
         averageRating = try container.decode(Double.self, forKey: .averageRating)
         lastExchangedAt = try container.decode(Date.self, forKey: .lastExchangedAt)
+        pixelPerson = try container.decodeIfPresent(PixelPersonProfile.self, forKey: .pixelPerson)
     }
 }
 
@@ -163,11 +301,13 @@ final class TasteExchangeStatsStore: ObservableObject {
         drinkCount: Int,
         effectiveDrinkCount: Int,
         averageRating: Double,
-        profile: [TasteProfileDrink]? = nil
+        profile: [TasteProfileDrink]? = nil,
+        pixelPerson: PixelPersonProfile? = nil
     ) {
-        guard !ownerID.isEmpty else { return }
+        guard !ownerID.isEmpty, ownerID != SharedCompendiumStore.localOwnerID else { return }
 
         let existingProfile = stats.peers.first { $0.ownerID == ownerID }?.profile ?? []
+        let existingPixelPerson = stats.peers.first { $0.ownerID == ownerID }?.pixelPerson
         let incomingProfile = profile ?? existingProfile
         let snapshot = TastePeerSnapshot(
             ownerID: ownerID,
@@ -176,13 +316,48 @@ final class TasteExchangeStatsStore: ObservableObject {
             effectiveDrinkCount: max(0, effectiveDrinkCount),
             averageRating: averageRating,
             lastExchangedAt: .now,
-            profile: incomingProfile
+            profile: incomingProfile,
+            pixelPerson: pixelPerson ?? existingPixelPerson ?? PixelPersonProfile.make(
+                ownerID: ownerID,
+                ownerName: ownerName,
+                profile: incomingProfile
+            )
         )
 
         stats.peers.removeAll { peer in
             peer.ownerID == ownerID
         }
         stats.peers.append(snapshot)
+        stats.peers.sort { $0.lastExchangedAt > $1.lastExchangedAt }
+        stats.successfulExchangeCount = stats.peers.count
+        save()
+    }
+
+    func recordImportedCompendiumsIfMissing(_ compendiums: [SharedCompendium]) {
+        let existingOwnerIDs = Set(stats.peers.map(\.ownerID))
+        let missingCompendiums = compendiums.filter { compendium in
+            !compendium.ownerID.isEmpty
+                && compendium.ownerID != SharedCompendiumStore.localOwnerID
+                && !existingOwnerIDs.contains(compendium.ownerID)
+        }
+        guard !missingCompendiums.isEmpty else { return }
+
+        for compendium in missingCompendiums {
+            let profile = TasteScoreCalculator.profile(from: compendium)
+            stats.peers.append(
+                TastePeerSnapshot(
+                    ownerID: compendium.ownerID,
+                    ownerName: compendium.ownerName,
+                    drinkCount: TasteScoreCalculator.totalActualCupCount(profile: profile),
+                    effectiveDrinkCount: TasteScoreCalculator.effectiveCupCount(profile: profile),
+                    averageRating: TasteScoreCalculator.averageRating(profile: profile),
+                    lastExchangedAt: compendium.exportedAt,
+                    profile: profile,
+                    pixelPerson: compendium.pixelPerson ?? PixelPersonProfile.make(compendium: compendium)
+                )
+            )
+        }
+
         stats.peers.sort { $0.lastExchangedAt > $1.lastExchangedAt }
         stats.successfulExchangeCount = stats.peers.count
         save()
@@ -206,6 +381,7 @@ final class TasteExchangeStatsStore: ObservableObject {
         var normalizedPeers: [TastePeerSnapshot] = []
 
         for peer in stats.peers.sorted(by: { $0.lastExchangedAt > $1.lastExchangedAt }) {
+            guard peer.ownerID != SharedCompendiumStore.localOwnerID else { continue }
             let isDuplicate = normalizedPeers.contains { existing in
                 existing.ownerID == peer.ownerID
             }
